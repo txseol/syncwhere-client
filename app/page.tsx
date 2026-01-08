@@ -17,6 +17,9 @@ export default function Home() {
   const [token, setToken] = useState<string | null>(null);
   const [wsConnected, setWsConnected] = useState(false);
   const [logs, setLogs] = useState<string[]>([]);
+  const [systemMessage, setSystemMessage] = useState<string | null>(null);
+  const [createChannelName, setCreateChannelName] = useState("");
+  const [joinChannelName, setJoinChannelName] = useState("");
   const wsRef = useRef<WebSocket | null>(null);
 
   // 페이지 로드 시 저장된 토큰 확인
@@ -64,6 +67,21 @@ export default function Home() {
         if (eventType === "pong") {
           addLog(`PONG 수신: ${JSON.stringify(data)}`);
           alert("PONG!!!");
+        } else if (eventType === "systemmessage") {
+          addLog(`시스템 메시지: ${data.message}`);
+          setSystemMessage(data.message);
+          // 3초 후 시스템 메시지 자동 숨김
+          setTimeout(() => setSystemMessage(null), 3000);
+        } else if (eventType === "channelCreated") {
+          addLog(`채널 생성됨: ${data.channelName}`);
+          setSystemMessage(`채널 "${data.channelName}"이(가) 생성되었습니다.`);
+          setTimeout(() => setSystemMessage(null), 3000);
+        } else if (eventType === "channelJoined") {
+          addLog(`채널 가입됨: ${data.channelName}`);
+          setSystemMessage(`채널 "${data.channelName}"에 가입되었습니다.`);
+          setTimeout(() => setSystemMessage(null), 3000);
+        } else {
+          addLog(`이벤트 수신: ${eventType} - ${JSON.stringify(data)}`);
         }
       } catch (e) {
         addLog(`메시지 파싱 오류: ${e}`);
@@ -117,6 +135,52 @@ export default function Home() {
       };
       wsRef.current.send(JSON.stringify(pingData));
       addLog("PING 전송");
+    } else {
+      addLog("WebSocket이 연결되지 않았습니다");
+    }
+  };
+
+  const createChannel = () => {
+    if (!createChannelName.trim()) {
+      setSystemMessage("채널명을 입력해주세요.");
+      setTimeout(() => setSystemMessage(null), 3000);
+      return;
+    }
+    if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+      const createData = {
+        event: "createChannel",
+        data: {
+          time: Date.now(),
+          userid: user?.userid,
+          channelName: createChannelName.trim(),
+        },
+      };
+      wsRef.current.send(JSON.stringify(createData));
+      addLog(`채널 생성 요청: ${createChannelName}`);
+      setCreateChannelName("");
+    } else {
+      addLog("WebSocket이 연결되지 않았습니다");
+    }
+  };
+
+  const joinChannel = () => {
+    if (!joinChannelName.trim()) {
+      setSystemMessage("채널명을 입력해주세요.");
+      setTimeout(() => setSystemMessage(null), 3000);
+      return;
+    }
+    if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+      const joinData = {
+        event: "joinChannel",
+        data: {
+          time: Date.now(),
+          userid: user?.userid,
+          channelName: joinChannelName.trim(),
+        },
+      };
+      wsRef.current.send(JSON.stringify(joinData));
+      addLog(`채널 가입 요청: ${joinChannelName}`);
+      setJoinChannelName("");
     } else {
       addLog("WebSocket이 연결되지 않았습니다");
     }
@@ -195,6 +259,67 @@ export default function Home() {
               >
                 PING 전송
               </button>
+            </div>
+
+            {/* 시스템 메시지 */}
+            {systemMessage && (
+              <div className="bg-yellow-600 text-white rounded-lg p-4 text-center font-semibold animate-pulse">
+                {systemMessage}
+              </div>
+            )}
+
+            {/* 채널 생성 */}
+            <div className="bg-gray-800 rounded-lg p-4">
+              <h3 className="font-semibold mb-3">채널 생성</h3>
+              <div className="flex gap-2">
+                <input
+                  type="text"
+                  value={createChannelName}
+                  onChange={(e) => setCreateChannelName(e.target.value)}
+                  placeholder="생성할 채널명 입력"
+                  disabled={!wsConnected}
+                  className="flex-1 bg-gray-700 text-white px-4 py-2 rounded-lg focus:outline-none focus:ring-2 focus:ring-green-500 disabled:opacity-50"
+                  onKeyDown={(e) => e.key === "Enter" && createChannel()}
+                />
+                <button
+                  onClick={createChannel}
+                  disabled={!wsConnected}
+                  className={`px-6 py-2 rounded-lg font-semibold transition-colors ${
+                    wsConnected
+                      ? "bg-green-600 hover:bg-green-700"
+                      : "bg-gray-600 cursor-not-allowed"
+                  }`}
+                >
+                  생성
+                </button>
+              </div>
+            </div>
+
+            {/* 채널 가입 */}
+            <div className="bg-gray-800 rounded-lg p-4">
+              <h3 className="font-semibold mb-3">채널 가입</h3>
+              <div className="flex gap-2">
+                <input
+                  type="text"
+                  value={joinChannelName}
+                  onChange={(e) => setJoinChannelName(e.target.value)}
+                  placeholder="가입할 채널명 입력"
+                  disabled={!wsConnected}
+                  className="flex-1 bg-gray-700 text-white px-4 py-2 rounded-lg focus:outline-none focus:ring-2 focus:ring-purple-500 disabled:opacity-50"
+                  onKeyDown={(e) => e.key === "Enter" && joinChannel()}
+                />
+                <button
+                  onClick={joinChannel}
+                  disabled={!wsConnected}
+                  className={`px-6 py-2 rounded-lg font-semibold transition-colors ${
+                    wsConnected
+                      ? "bg-purple-600 hover:bg-purple-700"
+                      : "bg-gray-600 cursor-not-allowed"
+                  }`}
+                >
+                  가입
+                </button>
+              </div>
             </div>
 
             {/* 로그 */}
