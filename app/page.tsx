@@ -220,6 +220,25 @@ export default function Home() {
     }
   };
 
+  const quitChannel = (channelName: string) => {
+    if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+      const quitData = {
+        event: "quitChannel",
+        data: {
+          time: Date.now(),
+          userid: user?.userid,
+          channel: channelName,
+        },
+      };
+      wsRef.current.send(JSON.stringify(quitData));
+      addLog(`채널 탈퇴 요청: ${channelName}`);
+      // 탈퇴 후 채널 목록 새로고침
+      setTimeout(() => requestChannelList(), 500);
+    } else {
+      addLog("WebSocket이 연결되지 않았습니다");
+    }
+  };
+
   return (
     <div className="min-h-screen bg-gray-900 text-white p-8">
       <div className="max-w-2xl mx-auto">
@@ -375,9 +394,22 @@ export default function Home() {
                               ? `'${channel.channelname}' - 가입됨`
                               : channel.channelname}
                           </span>
-                          <span className="text-gray-400 text-sm">
-                            {channel.users.length}명
-                          </span>
+                          <div className="flex items-center gap-2">
+                            <span className="text-gray-400 text-sm">
+                              {channel.users.length}명
+                            </span>
+                            {isJoined && (
+                              <button
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  quitChannel(channel.channelname);
+                                }}
+                                className="px-2 py-1 bg-red-600 hover:bg-red-700 text-white text-xs rounded transition-colors"
+                              >
+                                탈퇴
+                              </button>
+                            )}
+                          </div>
                         </li>
                       );
                     })}
