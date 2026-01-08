@@ -12,6 +12,11 @@ interface User {
   email: string;
 }
 
+interface Channel {
+  channelname: string;
+  users: string[];
+}
+
 export default function Home() {
   const [user, setUser] = useState<User | null>(null);
   const [token, setToken] = useState<string | null>(null);
@@ -19,7 +24,7 @@ export default function Home() {
   const [logs, setLogs] = useState<string[]>([]);
   const [systemMessage, setSystemMessage] = useState<string | null>(null);
   const [createChannelName, setCreateChannelName] = useState("");
-  const [joinChannelName, setJoinChannelName] = useState("");
+  const [channels, setChannels] = useState<Channel[]>([]);
   const wsRef = useRef<WebSocket | null>(null);
 
   // 페이지 로드 시 저장된 토큰 확인
@@ -58,6 +63,15 @@ export default function Home() {
     ws.onopen = () => {
       setWsConnected(true);
       addLog("WebSocket 연결됨");
+      // 연결 시 채널 목록 자동 요청
+      const listData = {
+        event: "listChannel",
+        data: {
+          time: Date.now(),
+          userid: user?.userid,
+        },
+      };
+      ws.send(JSON.stringify(listData));
     };
 
     ws.onmessage = (event) => {
@@ -76,10 +90,17 @@ export default function Home() {
           addLog(`채널 생성됨: ${data.channelName}`);
           setSystemMessage(`채널 "${data.channelName}"이(가) 생성되었습니다.`);
           setTimeout(() => setSystemMessage(null), 3000);
+          // 채널 목록 갱신
+          requestChannelList();
         } else if (eventType === "channelJoined") {
           addLog(`채널 가입됨: ${data.channelName}`);
           setSystemMessage(`채널 "${data.channelName}"에 가입되었습니다.`);
           setTimeout(() => setSystemMessage(null), 3000);
+          // 채널 목록 갱신
+          requestChannelList();
+        } else if (eventType === "channelList") {
+          addLog(`채널 목록 수신: ${data.channels.length}개`);
+          setChannels(data.channels || []);
         } else {
           addLog(`이벤트 수신: ${eventType} - ${JSON.stringify(data)}`);
         }
@@ -163,8 +184,8 @@ export default function Home() {
     }
   };
 
-  const joinChannel = () => {
-    if (!joinChannelName.trim()) {
+  const joinChannel = (channelName: string) => {
+    if (!channelName.trim()) {
       setSystemMessage("채널명을 입력해주세요.");
       setTimeout(() => setSystemMessage(null), 3000);
       return;
@@ -175,14 +196,27 @@ export default function Home() {
         data: {
           time: Date.now(),
           userid: user?.userid,
-          channelName: joinChannelName.trim(),
+          channelName: channelName.trim(),
         },
       };
       wsRef.current.send(JSON.stringify(joinData));
-      addLog(`채널 가입 요청: ${joinChannelName}`);
-      setJoinChannelName("");
+      addLog(`채널 가입 요청: ${channelName}`);
     } else {
       addLog("WebSocket이 연결되지 않았습니다");
+    }
+  };
+
+  const requestChannelList = () => {
+    if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+      const listData = {
+        event: "listChannel",
+        data: {
+          time: Date.now(),
+          userid: user?.userid,
+        },
+      };
+      wsRef.current.send(JSON.stringify(listData));
+      addLog("채널 목록 요청");
     }
   };
 
@@ -295,30 +329,60 @@ export default function Home() {
               </div>
             </div>
 
-            {/* 채널 가입 */}
+            {/* 채널 목록 */}
             <div className="bg-gray-800 rounded-lg p-4">
-              <h3 className="font-semibold mb-3">채널 가입</h3>
-              <div className="flex gap-2">
-                <input
-                  type="text"
-                  value={joinChannelName}
-                  onChange={(e) => setJoinChannelName(e.target.value)}
-                  placeholder="가입할 채널명 입력"
-                  disabled={!wsConnected}
-                  className="flex-1 bg-gray-700 text-white px-4 py-2 rounded-lg focus:outline-none focus:ring-2 focus:ring-purple-500 disabled:opacity-50"
-                  onKeyDown={(e) => e.key === "Enter" && joinChannel()}
-                />
+              <div className="flex items-center justify-between mb-3">
+                <h3 className="font-semibold">채널 목록</h3>
                 <button
-                  onClick={joinChannel}
+                  onClick={requestChannelList}
                   disabled={!wsConnected}
-                  className={`px-6 py-2 rounded-lg font-semibold transition-colors ${
+                  className={`px-4 py-1 rounded text-sm transition-colors ${
                     wsConnected
-                      ? "bg-purple-600 hover:bg-purple-700"
-                      : "bg-gray-600 cursor-not-allowed"
+                      ? "bg-gray-600 hover:bg-gray-500"
+                      : "bg-gray-700 cursor-not-allowed"
                   }`}
                 >
-                  가입
+                  새로고침
                 </button>
+              </div>
+              <div className="bg-gray-700 rounded-lg max-h-48 overflow-y-auto">
+                {channels.length === 0 ? (
+                  <p className="text-gray-400 text-center py-4">
+                    채널이 없습니다
+                  </p>
+                ) : (
+                  <ul className="divide-y divide-gray-600">
+                    {channels.map((channel, index) => {
+                      const isJoined = channel.users.includes(
+                        user?.userid || ""
+                      );
+                      return (
+                        <li
+                          key={index}
+                          className={`px-4 py-3 flex items-center justify-between hover:bg-gray-600 transition-colors ${
+                            isJoined ? "" : "cursor-pointer"
+                          }`}
+                          onClick={() =>
+                            !isJoined && joinChannel(channel.channelname)
+                          }
+                        >
+                          <span
+                            className={
+                              isJoined ? "text-lime-400" : "text-white"
+                            }
+                          >
+                            {isJoined
+                              ? `'${channel.channelname}' - 가입됨`
+                              : channel.channelname}
+                          </span>
+                          <span className="text-gray-400 text-sm">
+                            {channel.users.length}명
+                          </span>
+                        </li>
+                      );
+                    })}
+                  </ul>
+                )}
               </div>
             </div>
 
