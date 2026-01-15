@@ -3,8 +3,6 @@
 
 import { useEffect, useState, useRef } from "react";
 
-const GOOGLE_CLIENT_ID = process.env.NEXT_PUBLIC_GOOGLE_CLIENT_ID!;
-const REDIRECT_URI = process.env.NEXT_PUBLIC_REDIRECT_URI!;
 const API_BASE_URL = process.env.NEXT_PUBLIC_API_BASE_URL!;
 const WS_URL = process.env.NEXT_PUBLIC_WS_URL!;
 
@@ -124,16 +122,8 @@ export default function Home() {
   };
 
   const handleGoogleLogin = () => {
-    const googleAuthUrl = new URL(
-      "https://accounts.google.com/o/oauth2/v2/auth"
-    );
-    googleAuthUrl.searchParams.set("client_id", GOOGLE_CLIENT_ID);
-    googleAuthUrl.searchParams.set("redirect_uri", REDIRECT_URI);
-    googleAuthUrl.searchParams.set("response_type", "code");
-    googleAuthUrl.searchParams.set("scope", "email profile");
-    googleAuthUrl.searchParams.set("access_type", "offline");
-
-    window.location.href = googleAuthUrl.toString();
+    // API 라우트를 통해 Google OAuth 시작
+    window.location.href = "/api/auth/google/login?platform=web";
   };
 
   const handleLogout = () => {
