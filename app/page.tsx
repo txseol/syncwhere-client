@@ -122,8 +122,8 @@ export default function Home() {
   };
 
   const handleGoogleLogin = () => {
-    // API 라우트를 통해 Google OAuth 시작
-    window.location.href = "/api/auth/google/login?platform=web";
+    // 페이지 라우트를 통해 Google OAuth 시작 (nginx가 /api를 Node.js로 프록시하므로)
+    window.location.href = "/auth/google/login?platform=web";
   };
 
   const handleLogout = () => {

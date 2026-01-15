@@ -1,21 +1,24 @@
-import { NextRequest, NextResponse } from "next/server";
+import { redirect } from "next/navigation";
 
 const GOOGLE_CLIENT_ID = process.env.NEXT_PUBLIC_GOOGLE_CLIENT_ID!;
 
-export async function GET(request: NextRequest) {
-  const { searchParams } = new URL(request.url);
-  const platform = searchParams.get("platform");
+export default function GoogleLoginPage({
+  searchParams,
+}: {
+  searchParams: { platform?: string };
+}) {
+  const platform = searchParams.platform;
 
   // platform에 따라 redirect_uri 설정
   let redirectUri: string;
 
   switch (platform) {
     case "vscode":
-      redirectUri = "https://syncwhere.com/api/auth/vscode/callback";
+      redirectUri = "https://syncwhere.com/auth/vscode/callback";
       break;
     case "web":
     default:
-      redirectUri = "https://syncwhere.com/api/auth/google/callback";
+      redirectUri = "https://syncwhere.com/auth/google/callback";
       break;
   }
 
@@ -29,5 +32,5 @@ export async function GET(request: NextRequest) {
   googleAuthUrl.searchParams.set("access_type", "offline");
   googleAuthUrl.searchParams.set("prompt", "consent");
 
-  return NextResponse.redirect(googleAuthUrl.toString());
+  redirect(googleAuthUrl.toString());
 }
