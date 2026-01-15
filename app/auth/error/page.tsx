@@ -5,7 +5,8 @@ import { Suspense } from "react";
 
 function ErrorContent() {
   const searchParams = useSearchParams();
-  const message = searchParams.get("message") || "알 수 없는 오류가 발생했습니다";
+  const message =
+    searchParams.get("message") || "알 수 없는 오류가 발생했습니다";
 
   return (
     <div className="min-h-screen bg-gray-900 text-white flex items-center justify-center">

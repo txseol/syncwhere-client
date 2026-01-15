@@ -11,13 +11,17 @@ export async function GET(request: NextRequest) {
   // 에러 처리
   if (errorParam) {
     return NextResponse.redirect(
-      `https://syncwhere.com/auth/error?message=${encodeURIComponent(`Google 로그인 오류: ${errorParam}`)}`
+      `https://syncwhere.com/auth/error?message=${encodeURIComponent(
+        `Google 로그인 오류: ${errorParam}`
+      )}`
     );
   }
 
   if (!code) {
     return NextResponse.redirect(
-      `https://syncwhere.com/auth/error?message=${encodeURIComponent("인증 코드가 없습니다")}`
+      `https://syncwhere.com/auth/error?message=${encodeURIComponent(
+        "인증 코드가 없습니다"
+      )}`
     );
   }
 
@@ -66,7 +70,9 @@ export async function GET(request: NextRequest) {
   } catch (err) {
     const errorMessage = err instanceof Error ? err.message : "알 수 없는 오류";
     return NextResponse.redirect(
-      `https://syncwhere.com/auth/error?message=${encodeURIComponent(errorMessage)}`
+      `https://syncwhere.com/auth/error?message=${encodeURIComponent(
+        errorMessage
+      )}`
     );
   }
 }
