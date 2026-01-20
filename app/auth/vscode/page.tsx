@@ -1,24 +1,49 @@
+// app/auth/vscode/page.tsx
 "use client";
 
-import { useEffect } from "react";
+import { useEffect, useState } from "react";
 
-const GOOGLE_CLIENT_ID = process.env.NEXT_PUBLIC_GOOGLE_CLIENT_ID!;
+const GOOGLE_CLIENT_ID = process.env.NEXT_PUBLIC_GOOGLE_CLIENT_ID || "";
 // VSCode용 콜백 URL (브라우저용과 다름!)
 const REDIRECT_URI = "https://syncwhere.com/auth/vscode/callback";
 
 export default function VscodeLogin() {
-  useEffect(() => {
-    const googleAuthUrl = new URL(
-      "https://accounts.google.com/o/oauth2/v2/auth"
-    );
-    googleAuthUrl.searchParams.set("client_id", GOOGLE_CLIENT_ID);
-    googleAuthUrl.searchParams.set("redirect_uri", REDIRECT_URI);
-    googleAuthUrl.searchParams.set("response_type", "code");
-    googleAuthUrl.searchParams.set("scope", "email profile");
-    googleAuthUrl.searchParams.set("access_type", "offline");
+  const [error, setError] = useState<string | null>(null);
 
-    window.location.href = googleAuthUrl.toString();
+  useEffect(() => {
+    // 환경변수 검증
+    if (!GOOGLE_CLIENT_ID) {
+      setError("Google Client ID가 설정되지 않았습니다");
+      return;
+    }
+
+    try {
+      const googleAuthUrl = new URL(
+        "https://accounts.google.com/o/oauth2/v2/auth",
+      );
+      googleAuthUrl.searchParams.set("client_id", GOOGLE_CLIENT_ID);
+      googleAuthUrl.searchParams.set("redirect_uri", REDIRECT_URI);
+      googleAuthUrl.searchParams.set("response_type", "code");
+      googleAuthUrl.searchParams.set("scope", "email profile");
+      googleAuthUrl.searchParams.set("access_type", "offline");
+
+      window.location.href = googleAuthUrl.toString();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "URL 생성 실패");
+    }
   }, []);
+
+  if (error) {
+    return (
+      <div className="min-h-screen bg-gray-900 text-white flex items-center justify-center">
+        <div className="text-center">
+          <div className="text-red-500 text-5xl mb-4">✕</div>
+          <p className="text-xl mb-2">오류 발생</p>
+          <p className="text-gray-400">{error}</p>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="min-h-screen bg-gray-900 text-white flex items-center justify-center">

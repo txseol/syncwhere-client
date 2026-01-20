@@ -1,21 +1,26 @@
 // app/auth/vscode/callback/page.tsx
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useState, useRef } from "react";
 import { useSearchParams } from "next/navigation";
 import { Suspense } from "react";
 
-const API_BASE_URL = process.env.NEXT_PUBLIC_API_BASE_URL!;
+const API_BASE_URL = process.env.NEXT_PUBLIC_API_BASE_URL || "";
 
 function VscodeCallbackContent() {
   const searchParams = useSearchParams();
   const [status, setStatus] = useState<"loading" | "success" | "error">(
-    "loading"
+    "loading",
   );
   const [token, setToken] = useState<string>("");
   const [error, setError] = useState<string>("");
+  const hasProcessed = useRef(false); // 중복 실행 방지
 
   useEffect(() => {
+    // 이미 처리했으면 무시
+    if (hasProcessed.current) return;
+    hasProcessed.current = true;
+
     const code = searchParams.get("code");
     const errorParam = searchParams.get("error");
 
@@ -35,7 +40,17 @@ function VscodeCallbackContent() {
   }, [searchParams]);
 
   const exchangeCodeForToken = async (code: string) => {
+    // API URL 검증
+    if (!API_BASE_URL) {
+      setStatus("error");
+      setError("API 서버 URL이 설정되지 않았습니다");
+      return;
+    }
+
     try {
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 15000); // 15초 타임아웃
+
       const response = await fetch(`${API_BASE_URL}/api/auth/google`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -44,12 +59,15 @@ function VscodeCallbackContent() {
           platform: "vscode",
           redirect_uri: "https://syncwhere.com/auth/vscode/callback",
         }),
+        signal: controller.signal,
       });
+
+      clearTimeout(timeoutId);
 
       const data = await response.json();
 
       if (!response.ok) {
-        throw new Error(data.error || "인증 실패");
+        throw new Error(data.error_description || data.error || "인증 실패");
       }
 
       setToken(data.token);
@@ -57,17 +75,25 @@ function VscodeCallbackContent() {
 
       // 자동으로 VSCode로 리다이렉트
       window.location.href = `vscode://syncwhere.syncwhere/callback?token=${encodeURIComponent(
-        data.token
+        data.token,
       )}`;
     } catch (err) {
       setStatus("error");
-      setError(err instanceof Error ? err.message : "알 수 없는 오류");
+      if (err instanceof Error) {
+        if (err.name === "AbortError") {
+          setError("요청 시간이 초과되었습니다. 다시 시도해주세요.");
+        } else {
+          setError(err.message);
+        }
+      } else {
+        setError("알 수 없는 오류가 발생했습니다");
+      }
     }
   };
 
   const openInVscode = () => {
     window.location.href = `vscode://syncwhere.syncwhere/callback?token=${encodeURIComponent(
-      token
+      token,
     )}`;
   };
 

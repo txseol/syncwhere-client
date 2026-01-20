@@ -2,12 +2,23 @@ import { redirect } from "next/navigation";
 
 const GOOGLE_CLIENT_ID = process.env.NEXT_PUBLIC_GOOGLE_CLIENT_ID!;
 
-export default function GoogleLoginPage({
+// Next.js 15+에서 searchParams는 Promise로 전달됨
+export default async function GoogleLoginPage({
   searchParams,
 }: {
-  searchParams: { platform?: string };
+  searchParams: Promise<{ platform?: string }>;
 }) {
-  const platform = searchParams.platform;
+  // searchParams를 await하여 실제 값 추출
+  const params = await searchParams;
+  const platform = params.platform;
+
+  // 환경변수 검증
+  if (!GOOGLE_CLIENT_ID) {
+    redirect(
+      "/auth/error?message=" +
+        encodeURIComponent("Google Client ID가 설정되지 않았습니다"),
+    );
+  }
 
   // platform에 따라 redirect_uri 설정
   let redirectUri: string;
