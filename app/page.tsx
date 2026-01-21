@@ -15,8 +15,13 @@ interface User {
 }
 
 interface Channel {
-  channelname: string;
-  users: string[];
+  channelId: string;
+  channelName: string;
+  memberCount: number;
+  createdAt: string;
+  joined: boolean;
+  myPermission: number | null; // 0: 오너, 1: 일반 멤버, null: 미가입
+  myJoinOrder: number | null;
 }
 
 export default function Home() {
@@ -144,17 +149,14 @@ export default function Home() {
           currentReconnectAttempts = 0;
           addLog("WebSocket 연결됨");
 
-          // 연결 시 채널 목록 자동 요청
-          if (user?.userid) {
-            const listData = {
-              event: "listChannel",
-              data: {
-                time: Date.now(),
-                userid: user.userid,
-              },
-            };
-            ws.send(JSON.stringify(listData));
-          }
+          // 연결 시 채널 목록 자동 요청 (서버에서 JWT로 유저 확인)
+          const listData = {
+            event: "listChannel",
+            data: {
+              time: Date.now(),
+            },
+          };
+          ws.send(JSON.stringify(listData));
         };
 
         ws.onmessage = (event) => {
@@ -178,11 +180,11 @@ export default function Home() {
                 );
                 setTimeout(() => setSystemMessage(null), 3000);
                 // 채널 목록 갱신 요청
-                if (ws.readyState === WebSocket.OPEN && user?.userid) {
+                if (ws.readyState === WebSocket.OPEN) {
                   ws.send(
                     JSON.stringify({
                       event: "listChannel",
-                      data: { time: Date.now(), userid: user.userid },
+                      data: { time: Date.now() },
                     }),
                   );
                 }
@@ -194,11 +196,11 @@ export default function Home() {
                 );
                 setTimeout(() => setSystemMessage(null), 3000);
                 // 채널 목록 갱신 요청
-                if (ws.readyState === WebSocket.OPEN && user?.userid) {
+                if (ws.readyState === WebSocket.OPEN) {
                   ws.send(
                     JSON.stringify({
                       event: "listChannel",
-                      data: { time: Date.now(), userid: user.userid },
+                      data: { time: Date.now() },
                     }),
                   );
                 }
@@ -208,11 +210,11 @@ export default function Home() {
                 setSystemMessage(`채널 "${data.channel}"에서 탈퇴했습니다.`);
                 setTimeout(() => setSystemMessage(null), 3000);
                 // 채널 목록 갱신 요청
-                if (ws.readyState === WebSocket.OPEN && user?.userid) {
+                if (ws.readyState === WebSocket.OPEN) {
                   ws.send(
                     JSON.stringify({
                       event: "listChannel",
-                      data: { time: Date.now(), userid: user.userid },
+                      data: { time: Date.now() },
                     }),
                   );
                 }
@@ -220,6 +222,13 @@ export default function Home() {
               case "channelList":
                 addLog(`채널 목록 수신: ${data.channels?.length || 0}개`);
                 setChannels(data.channels || []);
+                break;
+              case "error":
+                addLog(
+                  `에러: ${data.message} (원본 이벤트: ${data.originalEvent || "unknown"})`,
+                );
+                setSystemMessage(data.message);
+                setTimeout(() => setSystemMessage(null), 3000);
                 break;
               default:
                 addLog(`이벤트 수신: ${eventType} - ${JSON.stringify(data)}`);
@@ -311,12 +320,11 @@ export default function Home() {
 
   // 채널 목록 요청
   const requestChannelList = () => {
-    if (wsRef.current?.readyState === WebSocket.OPEN && user?.userid) {
+    if (wsRef.current?.readyState === WebSocket.OPEN) {
       const listData = {
         event: "listChannel",
         data: {
           time: Date.now(),
-          userid: user.userid,
         },
       };
       wsRef.current.send(JSON.stringify(listData));
@@ -350,7 +358,6 @@ export default function Home() {
         event: "createChannel",
         data: {
           time: Date.now(),
-          userid: user?.userid,
           channelName: createChannelName.trim(),
         },
       };
@@ -374,7 +381,6 @@ export default function Home() {
         event: "joinChannel",
         data: {
           time: Date.now(),
-          userid: user?.userid,
           channelName: channelName.trim(),
         },
       };
@@ -392,7 +398,6 @@ export default function Home() {
         event: "quitChannel",
         data: {
           time: Date.now(),
-          userid: user?.userid,
           channel: channelName,
         },
       };
@@ -436,14 +441,13 @@ export default function Home() {
           setIsReconnecting(false);
           addLog("WebSocket 연결됨 (수동 재연결)");
 
-          if (user?.userid) {
-            ws.send(
-              JSON.stringify({
-                event: "listChannel",
-                data: { time: Date.now(), userid: user.userid },
-              }),
-            );
-          }
+          // 채널 목록 요청 (서버에서 JWT로 유저 확인)
+          ws.send(
+            JSON.stringify({
+              event: "listChannel",
+              data: { time: Date.now() },
+            }),
+          );
         };
 
         ws.onmessage = (event) => {
@@ -455,9 +459,19 @@ export default function Home() {
                 addLog(`PONG 수신: ${JSON.stringify(data)}`);
                 alert("PONG!!!");
                 break;
+              case "systemmessage":
+                addLog(`시스템 메시지: ${data.message}`);
+                setSystemMessage(data.message);
+                setTimeout(() => setSystemMessage(null), 3000);
+                break;
               case "channelList":
                 addLog(`채널 목록 수신: ${data.channels?.length || 0}개`);
                 setChannels(data.channels || []);
+                break;
+              case "error":
+                addLog(`에러: ${data.message}`);
+                setSystemMessage(data.message);
+                setTimeout(() => setSystemMessage(null), 3000);
                 break;
               default:
                 addLog(`이벤트 수신: ${eventType}`);
@@ -640,48 +654,50 @@ export default function Home() {
                   </p>
                 ) : (
                   <ul className="divide-y divide-gray-600">
-                    {channels.map((channel, index) => {
-                      const isJoined = channel.users.includes(
-                        user?.userid || "",
-                      );
-                      return (
-                        <li
-                          key={index}
-                          className={`px-4 py-3 flex items-center justify-between hover:bg-gray-600 transition-colors ${
-                            isJoined ? "" : "cursor-pointer"
-                          }`}
-                          onClick={() =>
-                            !isJoined && joinChannel(channel.channelname)
-                          }
-                        >
+                    {channels.map((channel) => (
+                      <li
+                        key={channel.channelId}
+                        className={`px-4 py-3 flex items-center justify-between hover:bg-gray-600 transition-colors ${
+                          channel.joined ? "" : "cursor-pointer"
+                        }`}
+                        onClick={() =>
+                          !channel.joined && joinChannel(channel.channelName)
+                        }
+                      >
+                        <div className="flex flex-col">
                           <span
                             className={
-                              isJoined ? "text-lime-400" : "text-white"
+                              channel.joined ? "text-lime-400" : "text-white"
                             }
                           >
-                            {isJoined
-                              ? `'${channel.channelname}' - 가입됨`
-                              : channel.channelname}
-                          </span>
-                          <div className="flex items-center gap-2">
-                            <span className="text-gray-400 text-sm">
-                              {channel.users.length}명
-                            </span>
-                            {isJoined && (
-                              <button
-                                onClick={(e) => {
-                                  e.stopPropagation();
-                                  quitChannel(channel.channelname);
-                                }}
-                                className="px-2 py-1 bg-red-600 hover:bg-red-700 text-white text-xs rounded transition-colors"
-                              >
-                                탈퇴
-                              </button>
+                            {channel.channelName}
+                            {channel.joined && (
+                              <span className="ml-2 text-xs">
+                                {channel.myPermission === 0
+                                  ? "(오너)"
+                                  : "(멤버)"}
+                              </span>
                             )}
-                          </div>
-                        </li>
-                      );
-                    })}
+                          </span>
+                        </div>
+                        <div className="flex items-center gap-2">
+                          <span className="text-gray-400 text-sm">
+                            {channel.memberCount}명
+                          </span>
+                          {channel.joined && (
+                            <button
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                quitChannel(channel.channelName);
+                              }}
+                              className="px-2 py-1 bg-red-600 hover:bg-red-700 text-white text-xs rounded transition-colors"
+                            >
+                              탈퇴
+                            </button>
+                          )}
+                        </div>
+                      </li>
+                    ))}
                   </ul>
                 )}
               </div>
