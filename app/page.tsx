@@ -8,6 +8,7 @@ const WS_URL = process.env.NEXT_PUBLIC_WS_URL || "";
 // WebSocket 재연결 설정
 const WS_RECONNECT_INTERVAL = 3000; // 3초
 const WS_MAX_RECONNECT_ATTEMPTS = 5;
+const WS_HEALTHCHECK_INTERVAL = 15 * 60 * 1000; // 15분 (900초)
 
 interface User {
   userid: string;
@@ -29,14 +30,16 @@ export default function Home() {
   const [token, setToken] = useState<string | null>(null);
   const [wsConnected, setWsConnected] = useState(false);
   const [logs, setLogs] = useState<string[]>([]);
-  const [systemMessage, setSystemMessage] = useState<string | null>(null);
   const [createChannelName, setCreateChannelName] = useState("");
   const [channels, setChannels] = useState<Channel[]>([]);
   const [reconnectAttempts, setReconnectAttempts] = useState(0);
   const [isReconnecting, setIsReconnecting] = useState(false);
+  const [toastMessage, setToastMessage] = useState<string | null>(null);
 
   const wsRef = useRef<WebSocket | null>(null);
   const reconnectTimeoutRef = useRef<NodeJS.Timeout | null>(null);
+  const healthCheckIntervalRef = useRef<NodeJS.Timeout | null>(null);
+  const toastTimeoutRef = useRef<NodeJS.Timeout | null>(null);
   const mountedRef = useRef(true); // 마운트 상태 추적
 
   // 로그 추가 함수
@@ -52,6 +55,45 @@ export default function Home() {
       reconnectTimeoutRef.current = null;
     }
   }, []);
+
+  // 헬스체크 타이머 정리
+  const clearHealthCheckInterval = useCallback(() => {
+    if (healthCheckIntervalRef.current) {
+      clearInterval(healthCheckIntervalRef.current);
+      healthCheckIntervalRef.current = null;
+    }
+  }, []);
+
+  // 토스트 메시지 표시 함수
+  const showToast = useCallback((message: string, duration: number = 3000) => {
+    if (toastTimeoutRef.current) {
+      clearTimeout(toastTimeoutRef.current);
+    }
+    setToastMessage(message);
+    toastTimeoutRef.current = setTimeout(() => {
+      setToastMessage(null);
+    }, duration);
+  }, []);
+
+  // 토스트 메시지 닫기
+  const closeToast = useCallback(() => {
+    if (toastTimeoutRef.current) {
+      clearTimeout(toastTimeoutRef.current);
+    }
+    setToastMessage(null);
+  }, []);
+
+  // 헬스체크 ping 전송
+  const sendHealthCheckPing = useCallback(() => {
+    if (wsRef.current?.readyState === WebSocket.OPEN) {
+      const pingData = {
+        event: "ping",
+        data: { time: Date.now(), healthcheck: true },
+      };
+      wsRef.current.send(JSON.stringify(pingData));
+      addLog("헬스체크 PING 전송");
+    }
+  }, [addLog]);
 
   // 로그아웃 함수 (useCallback 없이 일반 함수로)
   const handleLogout = () => {
@@ -157,6 +199,15 @@ export default function Home() {
             },
           };
           ws.send(JSON.stringify(listData));
+
+          // 헬스체크 인터벌 시작 (15분마다)
+          clearHealthCheckInterval();
+          healthCheckIntervalRef.current = setInterval(() => {
+            sendHealthCheckPing();
+          }, WS_HEALTHCHECK_INTERVAL);
+          addLog(
+            `헬스체크 인터벌 시작 (${WS_HEALTHCHECK_INTERVAL / 1000 / 60}분)`,
+          );
         };
 
         ws.onmessage = (event) => {
@@ -166,19 +217,23 @@ export default function Home() {
             switch (eventType) {
               case "pong":
                 addLog(`PONG 수신: ${JSON.stringify(data)}`);
-                alert("PONG!!!");
+                if (data.healthcheck) {
+                  // 헬스체크 pong은 로그만
+                  addLog("헬스체크 PONG 수신");
+                } else {
+                  showToast("🏓 PONG!", 2000);
+                }
                 break;
               case "systemmessage":
                 addLog(`시스템 메시지: ${data.message}`);
-                setSystemMessage(data.message);
-                setTimeout(() => setSystemMessage(null), 3000);
+                showToast(data.message, 3000);
                 break;
               case "channelCreated":
                 addLog(`채널 생성됨: ${data.channel || data.channelName}`);
-                setSystemMessage(
-                  `채널 "${data.channel || data.channelName}"이(가) 생성되었습니다.`,
+                showToast(
+                  `✅ 채널 "${data.channel || data.channelName}"이(가) 생성되었습니다.`,
+                  3000,
                 );
-                setTimeout(() => setSystemMessage(null), 3000);
                 // 채널 목록 갱신 요청
                 if (ws.readyState === WebSocket.OPEN) {
                   ws.send(
@@ -191,10 +246,10 @@ export default function Home() {
                 break;
               case "channelJoined":
                 addLog(`채널 가입됨: ${data.channel || data.channelName}`);
-                setSystemMessage(
-                  `채널 "${data.channel || data.channelName}"에 가입되었습니다.`,
+                showToast(
+                  `✅ 채널 "${data.channel || data.channelName}"에 가입되었습니다.`,
+                  3000,
                 );
-                setTimeout(() => setSystemMessage(null), 3000);
                 // 채널 목록 갱신 요청
                 if (ws.readyState === WebSocket.OPEN) {
                   ws.send(
@@ -207,8 +262,7 @@ export default function Home() {
                 break;
               case "channelQuitted":
                 addLog(`채널 탈퇴됨: ${data.channel}`);
-                setSystemMessage(`채널 "${data.channel}"에서 탈퇴했습니다.`);
-                setTimeout(() => setSystemMessage(null), 3000);
+                showToast(`✅ 채널 "${data.channel}"에서 탈퇴했습니다.`, 3000);
                 // 채널 목록 갱신 요청
                 if (ws.readyState === WebSocket.OPEN) {
                   ws.send(
@@ -227,8 +281,7 @@ export default function Home() {
                 addLog(
                   `에러: ${data.message} (원본 이벤트: ${data.originalEvent || "unknown"})`,
                 );
-                setSystemMessage(data.message);
-                setTimeout(() => setSystemMessage(null), 3000);
+                showToast(`❌ ${data.message}`, 4000);
                 break;
               default:
                 addLog(`이벤트 수신: ${eventType} - ${JSON.stringify(data)}`);
@@ -243,6 +296,7 @@ export default function Home() {
         ws.onclose = (event) => {
           setWsConnected(false);
           wsRef.current = null;
+          clearHealthCheckInterval();
 
           if (!mountedRef.current) {
             addLog("WebSocket 연결 종료 (컴포넌트 언마운트)");
@@ -306,12 +360,21 @@ export default function Home() {
     return () => {
       mountedRef.current = false;
       clearReconnectTimeout();
+      clearHealthCheckInterval();
       if (wsRef.current) {
         wsRef.current.close(1000, "Component unmount");
         wsRef.current = null;
       }
     };
-  }, [token, user, addLog, clearReconnectTimeout]);
+  }, [
+    token,
+    user,
+    addLog,
+    clearReconnectTimeout,
+    clearHealthCheckInterval,
+    sendHealthCheckPing,
+    showToast,
+  ]);
 
   // Google 로그인 핸들러
   const handleGoogleLogin = () => {
@@ -349,8 +412,7 @@ export default function Home() {
   // 채널 생성
   const createChannel = () => {
     if (!createChannelName.trim()) {
-      setSystemMessage("채널명을 입력해주세요.");
-      setTimeout(() => setSystemMessage(null), 3000);
+      showToast("⚠️ 채널명을 입력해주세요.", 3000);
       return;
     }
     if (wsRef.current?.readyState === WebSocket.OPEN) {
@@ -372,8 +434,7 @@ export default function Home() {
   // 채널 가입
   const joinChannel = (channelName: string) => {
     if (!channelName.trim()) {
-      setSystemMessage("채널명을 입력해주세요.");
-      setTimeout(() => setSystemMessage(null), 3000);
+      showToast("⚠️ 채널명을 입력해주세요.", 3000);
       return;
     }
     if (wsRef.current?.readyState === WebSocket.OPEN) {
@@ -457,12 +518,15 @@ export default function Home() {
             switch (eventType) {
               case "pong":
                 addLog(`PONG 수신: ${JSON.stringify(data)}`);
-                alert("PONG!!!");
+                if (data.healthcheck) {
+                  addLog("헬스체크 PONG 수신");
+                } else {
+                  showToast("🏓 PONG!", 2000);
+                }
                 break;
               case "systemmessage":
                 addLog(`시스템 메시지: ${data.message}`);
-                setSystemMessage(data.message);
-                setTimeout(() => setSystemMessage(null), 3000);
+                showToast(data.message, 3000);
                 break;
               case "channelList":
                 addLog(`채널 목록 수신: ${data.channels?.length || 0}개`);
@@ -470,8 +534,7 @@ export default function Home() {
                 break;
               case "error":
                 addLog(`에러: ${data.message}`);
-                setSystemMessage(data.message);
-                setTimeout(() => setSystemMessage(null), 3000);
+                showToast(`❌ ${data.message}`, 4000);
                 break;
               default:
                 addLog(`이벤트 수신: ${eventType}`);
@@ -503,6 +566,36 @@ export default function Home() {
 
   return (
     <div className="min-h-screen bg-gray-900 text-white p-8">
+      {/* Toast 알림 (fixed position - 다른 요소 밀리지 않음) */}
+      {toastMessage && (
+        <div className="fixed top-0 left-0 right-0 z-50 animate-slide-down">
+          <div className="bg-linear-to-r from-green-600 to-green-500 text-white px-4 py-3 shadow-lg">
+            <div className="max-w-2xl mx-auto flex items-center justify-between">
+              <span className="font-medium">{toastMessage}</span>
+              <button
+                onClick={closeToast}
+                className="ml-4 hover:bg-green-700 rounded-full p-1 transition-colors"
+                aria-label="닫기"
+              >
+                <svg
+                  className="w-5 h-5"
+                  fill="none"
+                  stroke="currentColor"
+                  viewBox="0 0 24 24"
+                >
+                  <path
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                    strokeWidth={2}
+                    d="M6 18L18 6M6 6l12 12"
+                  />
+                </svg>
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
       <div className="max-w-2xl mx-auto">
         <h1 className="text-3xl font-bold mb-8 text-center">SyncWhere</h1>
 
@@ -596,13 +689,6 @@ export default function Home() {
                 PING 전송
               </button>
             </div>
-
-            {/* 시스템 메시지 */}
-            {systemMessage && (
-              <div className="bg-yellow-600 text-white rounded-lg p-4 text-center font-semibold animate-pulse">
-                {systemMessage}
-              </div>
-            )}
 
             {/* 채널 생성 */}
             <div className="bg-gray-800 rounded-lg p-4">
