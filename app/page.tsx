@@ -3,7 +3,6 @@
 
 import { useEffect, useState, useRef, useCallback } from "react";
 
-const API_BASE_URL = process.env.NEXT_PUBLIC_API_BASE_URL || "";
 const WS_URL = process.env.NEXT_PUBLIC_WS_URL || "";
 
 // WebSocket 재연결 설정
@@ -33,18 +32,7 @@ export default function Home() {
 
   const wsRef = useRef<WebSocket | null>(null);
   const reconnectTimeoutRef = useRef<NodeJS.Timeout | null>(null);
-  const isUnmountingRef = useRef(false);
-  const userRef = useRef<User | null>(null);
-  const tokenRef = useRef<string | null>(null);
-
-  // user와 token을 ref로도 관리 (콜백 내에서 최신값 접근용)
-  useEffect(() => {
-    userRef.current = user;
-  }, [user]);
-
-  useEffect(() => {
-    tokenRef.current = token;
-  }, [token]);
+  const mountedRef = useRef(true); // 마운트 상태 추적
 
   // 로그 추가 함수
   const addLog = useCallback((message: string) => {
@@ -60,27 +48,8 @@ export default function Home() {
     }
   }, []);
 
-  // 채널 목록 요청 함수
-  const requestChannelList = useCallback(() => {
-    if (
-      wsRef.current?.readyState === WebSocket.OPEN &&
-      userRef.current?.userid
-    ) {
-      const listData = {
-        event: "listChannel",
-        data: {
-          time: Date.now(),
-          userid: userRef.current.userid,
-        },
-      };
-      wsRef.current.send(JSON.stringify(listData));
-      addLog("채널 목록 요청");
-    }
-  }, [addLog]);
-
-  // 로그아웃 함수
-  const handleLogout = useCallback(() => {
-    isUnmountingRef.current = true;
+  // 로그아웃 함수 (useCallback 없이 일반 함수로)
+  const handleLogout = () => {
     clearReconnectTimeout();
 
     if (wsRef.current) {
@@ -102,15 +71,55 @@ export default function Home() {
     setChannels([]);
     setReconnectAttempts(0);
     setIsReconnecting(false);
+  };
 
-    setTimeout(() => {
-      isUnmountingRef.current = false;
-    }, 100);
-  }, [clearReconnectTimeout]);
+  // 페이지 로드 시 저장된 토큰 확인
+  useEffect(() => {
+    try {
+      const savedToken = localStorage.getItem("token");
+      const savedUser = localStorage.getItem("user");
 
-  // WebSocket 연결 함수
-  const connectWebSocket = useCallback(
-    (authToken: string, currentUser: User | null) => {
+      if (savedToken && savedUser) {
+        const parsedUser = JSON.parse(savedUser);
+        setToken(savedToken);
+        setUser(parsedUser);
+      }
+    } catch (error) {
+      console.error("저장된 인증 정보 로드 실패:", error);
+      localStorage.removeItem("token");
+      localStorage.removeItem("user");
+    }
+  }, []);
+
+  // WebSocket 연결 및 관리
+  useEffect(() => {
+    // 토큰이나 유저가 없으면 연결하지 않음
+    if (!token || !user) {
+      return;
+    }
+
+    // 환경 변수 검증
+    if (!WS_URL) {
+      addLog("WebSocket URL이 설정되지 않았습니다");
+      return;
+    }
+
+    // 이미 연결 중이거나 연결된 상태면 무시
+    if (
+      wsRef.current?.readyState === WebSocket.CONNECTING ||
+      wsRef.current?.readyState === WebSocket.OPEN
+    ) {
+      return;
+    }
+
+    mountedRef.current = true;
+    let currentReconnectAttempts = 0;
+
+    const connect = () => {
+      if (!mountedRef.current) {
+        return;
+      }
+
       // 이미 연결 중이거나 연결된 상태면 무시
       if (
         wsRef.current?.readyState === WebSocket.CONNECTING ||
@@ -119,17 +128,12 @@ export default function Home() {
         return;
       }
 
-      // 환경 변수 검증
-      if (!WS_URL) {
-        addLog("WebSocket URL이 설정되지 않았습니다");
-        return;
-      }
-
       try {
-        const ws = new WebSocket(`${WS_URL}?token=${authToken}`);
+        addLog("WebSocket 연결 시도...");
+        const ws = new WebSocket(`${WS_URL}?token=${token}`);
 
         ws.onopen = () => {
-          if (isUnmountingRef.current) {
+          if (!mountedRef.current) {
             ws.close();
             return;
           }
@@ -137,16 +141,16 @@ export default function Home() {
           setWsConnected(true);
           setReconnectAttempts(0);
           setIsReconnecting(false);
+          currentReconnectAttempts = 0;
           addLog("WebSocket 연결됨");
 
           // 연결 시 채널 목록 자동 요청
-          const userid = currentUser?.userid || userRef.current?.userid;
-          if (userid) {
+          if (user?.userid) {
             const listData = {
               event: "listChannel",
               data: {
                 time: Date.now(),
-                userid: userid,
+                userid: user.userid,
               },
             };
             ws.send(JSON.stringify(listData));
@@ -156,7 +160,6 @@ export default function Home() {
         ws.onmessage = (event) => {
           try {
             const { event: eventType, data } = JSON.parse(event.data);
-            const userid = userRef.current?.userid;
 
             switch (eventType) {
               case "pong":
@@ -174,11 +177,12 @@ export default function Home() {
                   `채널 "${data.channel || data.channelName}"이(가) 생성되었습니다.`,
                 );
                 setTimeout(() => setSystemMessage(null), 3000);
-                if (ws.readyState === WebSocket.OPEN && userid) {
+                // 채널 목록 갱신 요청
+                if (ws.readyState === WebSocket.OPEN && user?.userid) {
                   ws.send(
                     JSON.stringify({
                       event: "listChannel",
-                      data: { time: Date.now(), userid },
+                      data: { time: Date.now(), userid: user.userid },
                     }),
                   );
                 }
@@ -189,11 +193,12 @@ export default function Home() {
                   `채널 "${data.channel || data.channelName}"에 가입되었습니다.`,
                 );
                 setTimeout(() => setSystemMessage(null), 3000);
-                if (ws.readyState === WebSocket.OPEN && userid) {
+                // 채널 목록 갱신 요청
+                if (ws.readyState === WebSocket.OPEN && user?.userid) {
                   ws.send(
                     JSON.stringify({
                       event: "listChannel",
-                      data: { time: Date.now(), userid },
+                      data: { time: Date.now(), userid: user.userid },
                     }),
                   );
                 }
@@ -202,11 +207,12 @@ export default function Home() {
                 addLog(`채널 탈퇴됨: ${data.channel}`);
                 setSystemMessage(`채널 "${data.channel}"에서 탈퇴했습니다.`);
                 setTimeout(() => setSystemMessage(null), 3000);
-                if (ws.readyState === WebSocket.OPEN && userid) {
+                // 채널 목록 갱신 요청
+                if (ws.readyState === WebSocket.OPEN && user?.userid) {
                   ws.send(
                     JSON.stringify({
                       event: "listChannel",
-                      data: { time: Date.now(), userid },
+                      data: { time: Date.now(), userid: user.userid },
                     }),
                   );
                 }
@@ -229,22 +235,47 @@ export default function Home() {
           setWsConnected(false);
           wsRef.current = null;
 
-          if (isUnmountingRef.current) {
-            addLog("WebSocket 연결 종료 (페이지 이탈)");
+          if (!mountedRef.current) {
+            addLog("WebSocket 연결 종료 (컴포넌트 언마운트)");
             return;
           }
 
-          // 정상 종료가 아닌 경우 재연결 시도
-          if (event.code !== 1000 && event.code !== 1008) {
-            addLog(`WebSocket 연결 끊김 (코드: ${event.code})`);
-            attemptReconnect(authToken, currentUser);
-          } else if (event.code === 1008) {
-            // 인증 오류 - 토큰 만료 등
+          // 인증 오류
+          if (event.code === 1008) {
             addLog("WebSocket 인증 실패 - 다시 로그인해주세요");
             handleLogout();
-          } else {
-            addLog("WebSocket 연결 종료");
+            return;
           }
+
+          // 정상 종료
+          if (event.code === 1000) {
+            addLog("WebSocket 연결 종료");
+            return;
+          }
+
+          // 비정상 종료 - 재연결 시도
+          addLog(`WebSocket 연결 끊김 (코드: ${event.code})`);
+
+          currentReconnectAttempts++;
+          if (currentReconnectAttempts > WS_MAX_RECONNECT_ATTEMPTS) {
+            addLog(
+              `최대 재연결 시도 횟수(${WS_MAX_RECONNECT_ATTEMPTS}회) 초과`,
+            );
+            setIsReconnecting(false);
+            return;
+          }
+
+          setIsReconnecting(true);
+          setReconnectAttempts(currentReconnectAttempts);
+          addLog(
+            `재연결 시도 ${currentReconnectAttempts}/${WS_MAX_RECONNECT_ATTEMPTS} (${WS_RECONNECT_INTERVAL / 1000}초 후)`,
+          );
+
+          reconnectTimeoutRef.current = setTimeout(() => {
+            if (mountedRef.current) {
+              connect();
+            }
+          }, WS_RECONNECT_INTERVAL);
         };
 
         ws.onerror = () => {
@@ -256,81 +287,41 @@ export default function Home() {
         addLog(
           `WebSocket 연결 실패: ${error instanceof Error ? error.message : String(error)}`,
         );
-        attemptReconnect(authToken, currentUser);
       }
-    },
-    [addLog, handleLogout],
-  );
+    };
 
-  // 재연결 시도 함수
-  const attemptReconnect = useCallback(
-    (authToken: string, currentUser: User | null) => {
-      if (isUnmountingRef.current) return;
+    // 초기 연결
+    connect();
 
-      setReconnectAttempts((prev) => {
-        const newAttempts = prev + 1;
-
-        if (newAttempts > WS_MAX_RECONNECT_ATTEMPTS) {
-          addLog(`최대 재연결 시도 횟수(${WS_MAX_RECONNECT_ATTEMPTS}회) 초과`);
-          setIsReconnecting(false);
-          return prev;
-        }
-
-        setIsReconnecting(true);
-        addLog(
-          `재연결 시도 ${newAttempts}/${WS_MAX_RECONNECT_ATTEMPTS} (${WS_RECONNECT_INTERVAL / 1000}초 후)`,
-        );
-
-        clearReconnectTimeout();
-        reconnectTimeoutRef.current = setTimeout(() => {
-          if (!isUnmountingRef.current) {
-            connectWebSocket(authToken, currentUser);
-          }
-        }, WS_RECONNECT_INTERVAL);
-
-        return newAttempts;
-      });
-    },
-    [addLog, clearReconnectTimeout, connectWebSocket],
-  );
-
-  // 페이지 로드 시 저장된 토큰 확인
-  useEffect(() => {
-    try {
-      const savedToken = localStorage.getItem("token");
-      const savedUser = localStorage.getItem("user");
-
-      if (savedToken && savedUser) {
-        const parsedUser = JSON.parse(savedUser);
-        setToken(savedToken);
-        setUser(parsedUser);
-      }
-    } catch (error) {
-      console.error("저장된 인증 정보 로드 실패:", error);
-      localStorage.removeItem("token");
-      localStorage.removeItem("user");
-    }
-  }, []);
-
-  // 토큰과 유저 정보가 있으면 WebSocket 연결
-  useEffect(() => {
-    if (token && user && !wsRef.current) {
-      connectWebSocket(token, user);
-    }
-
+    // Cleanup
     return () => {
-      isUnmountingRef.current = true;
+      mountedRef.current = false;
       clearReconnectTimeout();
       if (wsRef.current) {
         wsRef.current.close(1000, "Component unmount");
         wsRef.current = null;
       }
     };
-  }, [token, user, connectWebSocket, clearReconnectTimeout]);
+  }, [token, user, addLog, clearReconnectTimeout]);
 
   // Google 로그인 핸들러
   const handleGoogleLogin = () => {
     window.location.href = "/auth/google/login?platform=web";
+  };
+
+  // 채널 목록 요청
+  const requestChannelList = () => {
+    if (wsRef.current?.readyState === WebSocket.OPEN && user?.userid) {
+      const listData = {
+        event: "listChannel",
+        data: {
+          time: Date.now(),
+          userid: user.userid,
+        },
+      };
+      wsRef.current.send(JSON.stringify(listData));
+      addLog("채널 목록 요청");
+    }
   };
 
   // PING 전송
@@ -416,7 +407,83 @@ export default function Home() {
   const manualReconnect = () => {
     if (token && user) {
       setReconnectAttempts(0);
-      connectWebSocket(token, user);
+      setIsReconnecting(false);
+      // 기존 연결 정리
+      if (wsRef.current) {
+        wsRef.current.close(1000, "Manual reconnect");
+        wsRef.current = null;
+      }
+      // 약간의 딜레이 후 재연결 (상태 업데이트 보장)
+      setTimeout(() => {
+        // token과 user가 변하지 않으므로 useEffect가 다시 실행되지 않음
+        // 직접 연결을 시도해야 함
+        if (!WS_URL) {
+          addLog("WebSocket URL이 설정되지 않았습니다");
+          return;
+        }
+
+        mountedRef.current = true;
+
+        const ws = new WebSocket(`${WS_URL}?token=${token}`);
+
+        ws.onopen = () => {
+          if (!mountedRef.current) {
+            ws.close();
+            return;
+          }
+          setWsConnected(true);
+          setReconnectAttempts(0);
+          setIsReconnecting(false);
+          addLog("WebSocket 연결됨 (수동 재연결)");
+
+          if (user?.userid) {
+            ws.send(
+              JSON.stringify({
+                event: "listChannel",
+                data: { time: Date.now(), userid: user.userid },
+              }),
+            );
+          }
+        };
+
+        ws.onmessage = (event) => {
+          try {
+            const { event: eventType, data } = JSON.parse(event.data);
+
+            switch (eventType) {
+              case "pong":
+                addLog(`PONG 수신: ${JSON.stringify(data)}`);
+                alert("PONG!!!");
+                break;
+              case "channelList":
+                addLog(`채널 목록 수신: ${data.channels?.length || 0}개`);
+                setChannels(data.channels || []);
+                break;
+              default:
+                addLog(`이벤트 수신: ${eventType}`);
+            }
+          } catch (e) {
+            addLog(`메시지 파싱 오류`);
+          }
+        };
+
+        ws.onclose = (event) => {
+          setWsConnected(false);
+          wsRef.current = null;
+          if (event.code === 1008) {
+            addLog("WebSocket 인증 실패");
+            handleLogout();
+          } else {
+            addLog(`WebSocket 연결 종료 (코드: ${event.code})`);
+          }
+        };
+
+        ws.onerror = () => {
+          addLog("WebSocket 오류 발생");
+        };
+
+        wsRef.current = ws;
+      }, 100);
     }
   };
 
