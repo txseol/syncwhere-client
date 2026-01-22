@@ -97,7 +97,9 @@ export default function Home() {
 
   // 로그아웃 함수 (useCallback 없이 일반 함수로)
   const handleLogout = () => {
+    console.log("[Home] 로그아웃 시작");
     clearReconnectTimeout();
+    clearHealthCheckInterval();
 
     if (wsRef.current) {
       wsRef.current.close(1000, "User logout");
@@ -107,8 +109,9 @@ export default function Home() {
     try {
       localStorage.removeItem("token");
       localStorage.removeItem("user");
+      console.log("[Home] 로컬 스토리지 정리 완료");
     } catch (error) {
-      console.error("로컬 스토리지 정리 실패:", error);
+      console.error("[Home] 로컬 스토리지 정리 실패:", error);
     }
 
     setToken(null);
@@ -118,21 +121,26 @@ export default function Home() {
     setChannels([]);
     setReconnectAttempts(0);
     setIsReconnecting(false);
+    console.log("[Home] 로그아웃 완료");
   };
 
   // 페이지 로드 시 저장된 토큰 확인
   useEffect(() => {
+    console.log("[Home] 페이지 로드됨, 저장된 인증 정보 확인");
     try {
       const savedToken = localStorage.getItem("token");
       const savedUser = localStorage.getItem("user");
 
       if (savedToken && savedUser) {
         const parsedUser = JSON.parse(savedUser);
+        console.log("[Home] 저장된 사용자:", parsedUser.email);
         setToken(savedToken);
         setUser(parsedUser);
+      } else {
+        console.log("[Home] 저장된 인증 정보 없음");
       }
     } catch (error) {
-      console.error("저장된 인증 정보 로드 실패:", error);
+      console.error("[Home] 저장된 인증 정보 로드 실패:", error);
       localStorage.removeItem("token");
       localStorage.removeItem("user");
     }
@@ -142,11 +150,13 @@ export default function Home() {
   useEffect(() => {
     // 토큰이나 유저가 없으면 연결하지 않음
     if (!token || !user) {
+      console.log("[Home] 토큰/유저 없음, WebSocket 연결 안함");
       return;
     }
 
     // 환경 변수 검증
     if (!WS_URL) {
+      console.error("[Home] WS_URL 환경변수 미설정");
       addLog("WebSocket URL이 설정되지 않았습니다");
       return;
     }
@@ -156,14 +166,17 @@ export default function Home() {
       wsRef.current?.readyState === WebSocket.CONNECTING ||
       wsRef.current?.readyState === WebSocket.OPEN
     ) {
+      console.log("[Home] 이미 WebSocket 연결됨/연결중");
       return;
     }
 
+    console.log("[Home] WebSocket 연결 시작, URL:", WS_URL);
     mountedRef.current = true;
     let currentReconnectAttempts = 0;
 
     const connect = () => {
       if (!mountedRef.current) {
+        console.log("[Home] 컴포넌트 언마운트됨, 연결 취소");
         return;
       }
 
@@ -176,6 +189,7 @@ export default function Home() {
       }
 
       try {
+        console.log("[Home] WebSocket 연결 시도...");
         addLog("WebSocket 연결 시도...");
         const ws = new WebSocket(`${WS_URL}?token=${token}`);
 
@@ -185,6 +199,7 @@ export default function Home() {
             return;
           }
 
+          console.log("[Home] WebSocket 연결 성공");
           setWsConnected(true);
           setReconnectAttempts(0);
           setIsReconnecting(false);
@@ -294,6 +309,12 @@ export default function Home() {
         };
 
         ws.onclose = (event) => {
+          console.log(
+            "[Home] WebSocket 연결 종료, 코드:",
+            event.code,
+            "이유:",
+            event.reason,
+          );
           setWsConnected(false);
           wsRef.current = null;
           clearHealthCheckInterval();
@@ -305,6 +326,7 @@ export default function Home() {
 
           // 인증 오류
           if (event.code === 1008) {
+            console.error("[Home] WebSocket 인증 실패");
             addLog("WebSocket 인증 실패 - 다시 로그인해주세요");
             handleLogout();
             return;
@@ -317,10 +339,12 @@ export default function Home() {
           }
 
           // 비정상 종료 - 재연결 시도
+          console.warn("[Home] WebSocket 비정상 종료, 재연결 시도");
           addLog(`WebSocket 연결 끊김 (코드: ${event.code})`);
 
           currentReconnectAttempts++;
           if (currentReconnectAttempts > WS_MAX_RECONNECT_ATTEMPTS) {
+            console.error("[Home] 최대 재연결 시도 횟수 초과");
             addLog(
               `최대 재연결 시도 횟수(${WS_MAX_RECONNECT_ATTEMPTS}회) 초과`,
             );
@@ -341,12 +365,14 @@ export default function Home() {
           }, WS_RECONNECT_INTERVAL);
         };
 
-        ws.onerror = () => {
+        ws.onerror = (error) => {
+          console.error("[Home] WebSocket 오류:", error);
           addLog("WebSocket 오류 발생");
         };
 
         wsRef.current = ws;
       } catch (error) {
+        console.error("[Home] WebSocket 연결 실패:", error);
         addLog(
           `WebSocket 연결 실패: ${error instanceof Error ? error.message : String(error)}`,
         );
@@ -358,6 +384,7 @@ export default function Home() {
 
     // Cleanup
     return () => {
+      console.log("[Home] 컴포넌트 언마운트, WebSocket 정리");
       mountedRef.current = false;
       clearReconnectTimeout();
       clearHealthCheckInterval();

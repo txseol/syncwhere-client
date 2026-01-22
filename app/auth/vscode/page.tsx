@@ -9,11 +9,19 @@ const REDIRECT_URI = "https://syncwhere.com/auth/vscode/callback";
 
 export default function VscodeLogin() {
   const [error, setError] = useState<string | null>(null);
+  const [isRedirecting, setIsRedirecting] = useState(false);
 
   useEffect(() => {
+    // 이미 리다이렉트 중이면 무시
+    if (isRedirecting) return;
+
+    console.log("[VscodeLogin] 페이지 로드됨");
+
     // 환경변수 검증
     if (!GOOGLE_CLIENT_ID) {
-      setError("Google Client ID가 설정되지 않았습니다");
+      const errMsg = "Google Client ID가 설정되지 않았습니다";
+      console.error("[VscodeLogin] 에러:", errMsg);
+      setError(errMsg);
       return;
     }
 
@@ -27,11 +35,16 @@ export default function VscodeLogin() {
       googleAuthUrl.searchParams.set("scope", "email profile");
       googleAuthUrl.searchParams.set("access_type", "offline");
 
+      console.log("[VscodeLogin] Google OAuth로 리다이렉트 시작");
+      setIsRedirecting(true);
+
       window.location.href = googleAuthUrl.toString();
     } catch (err) {
-      setError(err instanceof Error ? err.message : "URL 생성 실패");
+      const errMsg = err instanceof Error ? err.message : "URL 생성 실패";
+      console.error("[VscodeLogin] 에러:", errMsg);
+      setError(errMsg);
     }
-  }, []);
+  }, [isRedirecting]);
 
   if (error) {
     return (

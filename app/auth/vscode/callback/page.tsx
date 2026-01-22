@@ -21,33 +21,44 @@ function VscodeCallbackContent() {
     if (hasProcessed.current) return;
     hasProcessed.current = true;
 
+    console.log("[VscodeCallback] 콜백 페이지 로드됨");
+
     const code = searchParams.get("code");
     const errorParam = searchParams.get("error");
 
     if (errorParam) {
+      console.error("[VscodeCallback] Google 에러:", errorParam);
       setStatus("error");
       setError(`Google 로그인 오류: ${errorParam}`);
       return;
     }
 
     if (!code) {
+      console.error("[VscodeCallback] 인증 코드 없음");
       setStatus("error");
       setError("인증 코드가 없습니다");
       return;
     }
 
+    console.log("[VscodeCallback] 인증 코드 수신, 토큰 교환 시작");
     exchangeCodeForToken(code);
   }, [searchParams]);
 
   const exchangeCodeForToken = async (code: string) => {
     // API URL 검증
     if (!API_BASE_URL) {
+      console.error("[VscodeCallback] API_BASE_URL 미설정");
       setStatus("error");
       setError("API 서버 URL이 설정되지 않았습니다");
       return;
     }
 
     try {
+      console.log(
+        "[VscodeCallback] API 요청 시작:",
+        `${API_BASE_URL}/api/auth/google`,
+      );
+
       const controller = new AbortController();
       const timeoutId = setTimeout(() => controller.abort(), 15000); // 15초 타임아웃
 
@@ -64,16 +75,23 @@ function VscodeCallbackContent() {
 
       clearTimeout(timeoutId);
 
+      console.log("[VscodeCallback] API 응답 상태:", response.status);
+
       const data = await response.json();
 
       if (!response.ok) {
-        throw new Error(data.error_description || data.error || "인증 실패");
+        const errMsg = data.error_description || data.error || "인증 실패";
+        console.error("[VscodeCallback] API 에러:", errMsg);
+        throw new Error(errMsg);
       }
+
+      console.log("[VscodeCallback] 토큰 교환 성공");
 
       setToken(data.token);
       setStatus("success");
 
       // 자동으로 VSCode로 리다이렉트
+      console.log("[VscodeCallback] VSCode로 리다이렉트");
       window.location.href = `vscode://syncwhere.syncwhere/callback?token=${encodeURIComponent(
         data.token,
       )}`;
@@ -81,17 +99,21 @@ function VscodeCallbackContent() {
       setStatus("error");
       if (err instanceof Error) {
         if (err.name === "AbortError") {
+          console.error("[VscodeCallback] 요청 타임아웃");
           setError("요청 시간이 초과되었습니다. 다시 시도해주세요.");
         } else {
+          console.error("[VscodeCallback] 에러:", err.message);
           setError(err.message);
         }
       } else {
+        console.error("[VscodeCallback] 알 수 없는 에러:", err);
         setError("알 수 없는 오류가 발생했습니다");
       }
     }
   };
 
   const openInVscode = () => {
+    console.log("[VscodeCallback] 수동 VSCode 열기 클릭");
     window.location.href = `vscode://syncwhere.syncwhere/callback?token=${encodeURIComponent(
       token,
     )}`;

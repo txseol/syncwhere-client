@@ -20,33 +20,44 @@ function CallbackContent() {
     if (hasProcessed.current) return;
     hasProcessed.current = true;
 
+    console.log("[GoogleCallback] 콜백 페이지 로드됨");
+
     const code = searchParams.get("code");
     const errorParam = searchParams.get("error");
 
     if (errorParam) {
+      console.error("[GoogleCallback] Google 에러:", errorParam);
       setStatus("error");
       setError(`Google 로그인 오류: ${errorParam}`);
       return;
     }
 
     if (!code) {
+      console.error("[GoogleCallback] 인증 코드 없음");
       setStatus("error");
       setError("인증 코드가 없습니다");
       return;
     }
 
+    console.log("[GoogleCallback] 인증 코드 수신, 토큰 교환 시작");
     exchangeCodeForToken(code);
   }, [searchParams, router]);
 
   const exchangeCodeForToken = async (code: string) => {
     // API URL 검증
     if (!API_BASE_URL) {
+      console.error("[GoogleCallback] API_BASE_URL 미설정");
       setStatus("error");
       setError("API 서버 URL이 설정되지 않았습니다");
       return;
     }
 
     try {
+      console.log(
+        "[GoogleCallback] API 요청 시작:",
+        `${API_BASE_URL}/api/auth/google`,
+      );
+
       const controller = new AbortController();
       const timeoutId = setTimeout(() => controller.abort(), 15000); // 15초 타임아웃
 
@@ -65,18 +76,28 @@ function CallbackContent() {
 
       clearTimeout(timeoutId);
 
+      console.log("[GoogleCallback] API 응답 상태:", response.status);
+
       const data = await response.json();
 
       if (!response.ok) {
-        throw new Error(data.error_description || data.error || "인증 실패");
+        const errMsg = data.error_description || data.error || "인증 실패";
+        console.error("[GoogleCallback] API 에러:", errMsg);
+        throw new Error(errMsg);
       }
+
+      console.log("[GoogleCallback] 토큰 교환 성공, 사용자:", data.user?.email);
 
       // 토큰과 사용자 정보 저장
       try {
         localStorage.setItem("token", data.token);
         localStorage.setItem("user", JSON.stringify(data.user));
+        console.log("[GoogleCallback] 로컬 스토리지 저장 완료");
       } catch (storageError) {
-        console.error("로컬 스토리지 저장 실패:", storageError);
+        console.error(
+          "[GoogleCallback] 로컬 스토리지 저장 실패:",
+          storageError,
+        );
         throw new Error("인증 정보 저장에 실패했습니다");
       }
 
@@ -84,17 +105,21 @@ function CallbackContent() {
 
       // 메인 페이지로 리다이렉트
       setTimeout(() => {
+        console.log("[GoogleCallback] 메인 페이지로 리다이렉트");
         router.push("/");
       }, 1000);
     } catch (err) {
       setStatus("error");
       if (err instanceof Error) {
         if (err.name === "AbortError") {
+          console.error("[GoogleCallback] 요청 타임아웃");
           setError("요청 시간이 초과되었습니다. 다시 시도해주세요.");
         } else {
+          console.error("[GoogleCallback] 에러:", err.message);
           setError(err.message);
         }
       } else {
+        console.error("[GoogleCallback] 알 수 없는 에러:", err);
         setError("알 수 없는 오류가 발생했습니다");
       }
     }
