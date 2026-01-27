@@ -25,6 +25,26 @@ interface Channel {
   myJoinOrder: number | null;
 }
 
+interface Document {
+  docId: string;
+  channelId: string;
+  name: string;
+  dir: string;
+  depth: number;
+  createdAt: string;
+  snapshotVersion: number;
+}
+
+// 트리 노드 인터페이스
+interface TreeNode {
+  name: string;
+  path: string;
+  depth: number;
+  isFolder: boolean;
+  children: TreeNode[];
+  doc?: Document;
+}
+
 export default function Home() {
   const [user, setUser] = useState<User | null>(null);
   const [token, setToken] = useState<string | null>(null);
@@ -35,12 +55,36 @@ export default function Home() {
   const [reconnectAttempts, setReconnectAttempts] = useState(0);
   const [isReconnecting, setIsReconnecting] = useState(false);
   const [toastMessage, setToastMessage] = useState<string | null>(null);
+  const [showLogs, setShowLogs] = useState(false);
+
+  // 채널 입장 상태
+  const [currentChannel, setCurrentChannel] = useState<Channel | null>(null);
+  const [documents, setDocuments] = useState<Document[]>([]);
+  const [expandedFolders, setExpandedFolders] = useState<Set<string>>(
+    new Set(["root"]),
+  );
+
+  // 컨텍스트 메뉴 상태
+  const [contextMenu, setContextMenu] = useState<{
+    x: number;
+    y: number;
+    targetPath: string;
+    targetDepth: number;
+  } | null>(null);
+
+  // 새 항목 생성 모달
+  const [createModal, setCreateModal] = useState<{
+    type: "folder" | "document";
+    dir: string;
+    depth: number;
+  } | null>(null);
+  const [newItemName, setNewItemName] = useState("");
 
   const wsRef = useRef<WebSocket | null>(null);
   const reconnectTimeoutRef = useRef<NodeJS.Timeout | null>(null);
   const healthCheckIntervalRef = useRef<NodeJS.Timeout | null>(null);
   const toastTimeoutRef = useRef<NodeJS.Timeout | null>(null);
-  const mountedRef = useRef(true); // 마운트 상태 추적
+  const mountedRef = useRef(true);
 
   // 로그 추가 함수
   const addLog = useCallback((message: string) => {
@@ -95,7 +139,7 @@ export default function Home() {
     }
   }, [addLog]);
 
-  // 로그아웃 함수 (useCallback 없이 일반 함수로)
+  // 로그아웃 함수
   const handleLogout = () => {
     console.log("[Home] 로그아웃 시작");
     clearReconnectTimeout();
@@ -119,10 +163,98 @@ export default function Home() {
     setWsConnected(false);
     setLogs([]);
     setChannels([]);
+    setCurrentChannel(null);
+    setDocuments([]);
     setReconnectAttempts(0);
     setIsReconnecting(false);
     console.log("[Home] 로그아웃 완료");
   };
+
+  // 문서 목록을 트리 구조로 변환
+  const buildDocumentTree = useCallback((docs: Document[]): TreeNode => {
+    const root: TreeNode = {
+      name: "root",
+      path: "root",
+      depth: 0,
+      isFolder: true,
+      children: [],
+    };
+
+    const folderMap = new Map<string, TreeNode>();
+    folderMap.set("root", root);
+
+    // 모든 폴더 경로 수집
+    const folderPaths = new Set<string>();
+    docs.forEach((doc) => {
+      if (doc.dir !== "root") {
+        const parts = doc.dir.split("/");
+        let currentPath = "";
+        for (let i = 0; i < parts.length; i++) {
+          currentPath = i === 0 ? parts[i] : `${currentPath}/${parts[i]}`;
+          if (currentPath !== "root") {
+            folderPaths.add(currentPath);
+          }
+        }
+      }
+    });
+
+    // 폴더 노드 생성
+    const sortedFolderPaths = Array.from(folderPaths).sort((a, b) => {
+      return a.split("/").length - b.split("/").length;
+    });
+
+    sortedFolderPaths.forEach((folderPath) => {
+      const parts = folderPath.split("/");
+      const folderName = parts[parts.length - 1];
+      const parentPath =
+        parts.length > 1 ? parts.slice(0, -1).join("/") : "root";
+      const depth = parts.length;
+
+      const folderNode: TreeNode = {
+        name: folderName,
+        path: folderPath,
+        depth: depth,
+        isFolder: true,
+        children: [],
+      };
+
+      folderMap.set(folderPath, folderNode);
+      const parentNode = folderMap.get(parentPath);
+      if (parentNode) {
+        parentNode.children.push(folderNode);
+      }
+    });
+
+    // 문서를 해당 폴더에 추가
+    docs.forEach((doc) => {
+      if (doc.name === ".option") return; // 폴더 마커 숨김
+
+      const parentNode = folderMap.get(doc.dir);
+      if (parentNode) {
+        parentNode.children.push({
+          name: doc.name,
+          path: `${doc.dir}/${doc.name}`,
+          depth: doc.depth,
+          isFolder: false,
+          children: [],
+          doc: doc,
+        });
+      }
+    });
+
+    // 정렬 (폴더 먼저, 이름순)
+    const sortChildren = (node: TreeNode) => {
+      node.children.sort((a, b) => {
+        if (a.isFolder && !b.isFolder) return -1;
+        if (!a.isFolder && b.isFolder) return 1;
+        return a.name.localeCompare(b.name);
+      });
+      node.children.forEach(sortChildren);
+    };
+    sortChildren(root);
+
+    return root;
+  }, []);
 
   // 페이지 로드 시 저장된 토큰 확인
   useEffect(() => {
@@ -297,6 +429,26 @@ export default function Home() {
                   `에러: ${data.message} (원본 이벤트: ${data.originalEvent || "unknown"})`,
                 );
                 showToast(`❌ ${data.message}`, 4000);
+                break;
+              case "docList":
+                addLog(`문서 목록 수신: ${data.documents?.length || 0}개`);
+                setDocuments(data.documents || []);
+                break;
+              case "docCreated":
+                addLog(`문서 생성됨: ${data.document?.name}`);
+                showToast(`✅ "${data.document?.name}" 생성됨`, 3000);
+                // 문서 목록에 추가
+                if (data.document) {
+                  setDocuments((prev) => [...prev, data.document]);
+                }
+                break;
+              case "docDeleted":
+                addLog(`문서 삭제됨: docId=${data.docId}`);
+                showToast(`🗑️ 문서가 삭제되었습니다.`, 3000);
+                // 문서 목록에서 제거
+                setDocuments((prev) =>
+                  prev.filter((d) => d.docId !== data.docId),
+                );
                 break;
               default:
                 addLog(`이벤트 수신: ${eventType} - ${JSON.stringify(data)}`);
@@ -496,6 +648,236 @@ export default function Home() {
     }
   };
 
+  // 채널 입장 (문서 목록 조회)
+  const enterChannel = (channel: Channel) => {
+    setCurrentChannel(channel);
+    setDocuments([]);
+    setExpandedFolders(new Set(["root"]));
+
+    // 문서 목록 요청
+    if (wsRef.current?.readyState === WebSocket.OPEN) {
+      wsRef.current.send(
+        JSON.stringify({
+          event: "listDoc",
+          data: {
+            time: Date.now(),
+            channelId: channel.channelId,
+          },
+        }),
+      );
+      addLog(`문서 목록 요청: ${channel.channelName}`);
+    }
+  };
+
+  // 채널 나가기 (목록으로 돌아가기)
+  const leaveChannel = () => {
+    setCurrentChannel(null);
+    setDocuments([]);
+    setExpandedFolders(new Set(["root"]));
+    setContextMenu(null);
+    setCreateModal(null);
+  };
+
+  // 폴더 토글
+  const toggleFolder = (path: string) => {
+    setExpandedFolders((prev) => {
+      const next = new Set(prev);
+      if (next.has(path)) {
+        next.delete(path);
+      } else {
+        next.add(path);
+      }
+      return next;
+    });
+  };
+
+  // 우클릭 컨텍스트 메뉴
+  const handleContextMenu = (
+    e: React.MouseEvent,
+    targetPath: string,
+    targetDepth: number,
+  ) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setContextMenu({
+      x: e.clientX,
+      y: e.clientY,
+      targetPath,
+      targetDepth,
+    });
+  };
+
+  // 컨텍스트 메뉴 닫기
+  const closeContextMenu = () => {
+    setContextMenu(null);
+  };
+
+  // 생성 모달 열기
+  const openCreateModal = (type: "folder" | "document") => {
+    if (!contextMenu) return;
+    setCreateModal({
+      type,
+      dir: contextMenu.targetPath,
+      depth: contextMenu.targetDepth + 1,
+    });
+    setNewItemName("");
+    setContextMenu(null);
+  };
+
+  // 폴더 생성
+  const createFolder = () => {
+    if (!createModal || !currentChannel || !newItemName.trim()) return;
+
+    const folderPath =
+      createModal.dir === "root"
+        ? newItemName.trim()
+        : `${createModal.dir}/${newItemName.trim()}`;
+
+    // .option 문서 생성으로 폴더 마킹
+    if (wsRef.current?.readyState === WebSocket.OPEN) {
+      wsRef.current.send(
+        JSON.stringify({
+          event: "createDoc",
+          data: {
+            time: Date.now(),
+            channelId: currentChannel.channelId,
+            docName: ".option",
+            dir: folderPath,
+            depth: createModal.depth,
+          },
+        }),
+      );
+      addLog(`폴더 생성 요청: ${folderPath}`);
+    }
+
+    setCreateModal(null);
+    setNewItemName("");
+  };
+
+  // 문서 생성
+  const createDocument = () => {
+    if (!createModal || !currentChannel || !newItemName.trim()) return;
+
+    if (wsRef.current?.readyState === WebSocket.OPEN) {
+      wsRef.current.send(
+        JSON.stringify({
+          event: "createDoc",
+          data: {
+            time: Date.now(),
+            channelId: currentChannel.channelId,
+            docName: newItemName.trim(),
+            dir: createModal.dir,
+            depth: createModal.depth,
+          },
+        }),
+      );
+      addLog(`문서 생성 요청: ${createModal.dir}/${newItemName.trim()}`);
+    }
+
+    setCreateModal(null);
+    setNewItemName("");
+  };
+
+  // 문서 삭제
+  const deleteDocument = (docId: string) => {
+    if (!currentChannel) return;
+
+    if (wsRef.current?.readyState === WebSocket.OPEN) {
+      wsRef.current.send(
+        JSON.stringify({
+          event: "deleteDoc",
+          data: {
+            time: Date.now(),
+            channelId: currentChannel.channelId,
+            docId,
+          },
+        }),
+      );
+      addLog(`문서 삭제 요청: docId=${docId}`);
+    }
+  };
+
+  // 폴더 삭제 (하위 모든 문서 삭제)
+  const deleteFolder = (folderPath: string) => {
+    if (!currentChannel) return;
+
+    // 해당 폴더와 하위의 모든 문서 찾기
+    const docsToDelete = documents.filter(
+      (doc) => doc.dir === folderPath || doc.dir.startsWith(`${folderPath}/`),
+    );
+
+    docsToDelete.forEach((doc) => {
+      if (wsRef.current?.readyState === WebSocket.OPEN) {
+        wsRef.current.send(
+          JSON.stringify({
+            event: "deleteDoc",
+            data: {
+              time: Date.now(),
+              channelId: currentChannel.channelId,
+              docId: doc.docId,
+            },
+          }),
+        );
+      }
+    });
+
+    addLog(`폴더 삭제 요청: ${folderPath} (${docsToDelete.length}개 문서)`);
+  };
+
+  // 트리 노드 렌더링
+  const renderTreeNode = (
+    node: TreeNode,
+    level: number = 0,
+  ): React.ReactNode => {
+    const isExpanded = expandedFolders.has(node.path);
+    const paddingLeft = level * 16;
+
+    if (node.isFolder) {
+      return (
+        <div key={node.path}>
+          <div
+            className="flex items-center py-1 px-2 hover:bg-gray-700 cursor-pointer select-none"
+            style={{ paddingLeft: `${paddingLeft + 8}px` }}
+            onClick={() => toggleFolder(node.path)}
+            onContextMenu={(e) => handleContextMenu(e, node.path, node.depth)}
+          >
+            <span className="mr-1 text-xs text-gray-400">
+              {isExpanded ? "▼" : "▶"}
+            </span>
+            <span className="mr-1">📁</span>
+            <span className="text-sm text-gray-200 truncate">{node.name}</span>
+          </div>
+          {isExpanded && (
+            <div>
+              {node.children.map((child) => renderTreeNode(child, level + 1))}
+            </div>
+          )}
+        </div>
+      );
+    }
+
+    return (
+      <div
+        key={node.path}
+        className="flex items-center py-1 px-2 hover:bg-gray-700 cursor-pointer select-none group"
+        style={{ paddingLeft: `${paddingLeft + 20}px` }}
+        onContextMenu={(e) => {
+          e.preventDefault();
+          e.stopPropagation();
+          // 문서 삭제 확인
+          if (node.doc && confirm(`"${node.name}" 문서를 삭제하시겠습니까?`)) {
+            deleteDocument(node.doc.docId);
+          }
+        }}
+      >
+        <span className="mr-1">📄</span>
+        <span className="text-sm text-gray-300 truncate flex-1">
+          {node.name}
+        </span>
+      </div>
+    );
+  };
+
   // 수동 재연결
   const manualReconnect = () => {
     if (token && user) {
@@ -592,8 +974,11 @@ export default function Home() {
   };
 
   return (
-    <div className="min-h-screen bg-gray-900 text-white p-8">
-      {/* Toast 알림 (fixed position - 다른 요소 밀리지 않음) */}
+    <div
+      className="h-screen bg-gray-900 text-white flex"
+      onClick={closeContextMenu}
+    >
+      {/* Toast 알림 */}
       {toastMessage && (
         <div className="fixed top-0 left-0 right-0 z-50 animate-slide-down">
           <div className="bg-linear-to-r from-green-600 to-green-500 text-white px-4 py-3 shadow-lg">
@@ -623,17 +1008,115 @@ export default function Home() {
         </div>
       )}
 
-      <div className="max-w-2xl mx-auto">
-        <h1 className="text-3xl font-bold mb-8 text-center">SyncWhere</h1>
+      {/* 컨텍스트 메뉴 */}
+      {contextMenu && (
+        <div
+          className="fixed bg-gray-800 border border-gray-600 rounded-lg shadow-xl py-1 z-50"
+          style={{ left: contextMenu.x, top: contextMenu.y }}
+          onClick={(e) => e.stopPropagation()}
+        >
+          <button
+            onClick={() => openCreateModal("folder")}
+            className="w-full px-4 py-2 text-left text-sm hover:bg-gray-700 flex items-center gap-2"
+          >
+            📁 새 폴더
+          </button>
+          <button
+            onClick={() => openCreateModal("document")}
+            className="w-full px-4 py-2 text-left text-sm hover:bg-gray-700 flex items-center gap-2"
+          >
+            📄 새 문서
+          </button>
+          {contextMenu.targetPath !== "root" && (
+            <>
+              <div className="border-t border-gray-600 my-1" />
+              <button
+                onClick={() => {
+                  if (
+                    confirm(
+                      `"${contextMenu.targetPath}" 폴더를 삭제하시겠습니까?\n(하위 모든 내용이 삭제됩니다)`,
+                    )
+                  ) {
+                    deleteFolder(contextMenu.targetPath);
+                  }
+                  setContextMenu(null);
+                }}
+                className="w-full px-4 py-2 text-left text-sm hover:bg-red-600 text-red-400 hover:text-white flex items-center gap-2"
+              >
+                🗑️ 폴더 삭제
+              </button>
+            </>
+          )}
+        </div>
+      )}
 
+      {/* 생성 모달 */}
+      {createModal && (
+        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
+          <div
+            className="bg-gray-800 rounded-lg p-6 w-96 shadow-xl"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <h3 className="text-lg font-semibold mb-4">
+              {createModal.type === "folder" ? "📁 새 폴더" : "📄 새 문서"}
+            </h3>
+            <p className="text-sm text-gray-400 mb-2">
+              위치: {createModal.dir}
+            </p>
+            <input
+              type="text"
+              value={newItemName}
+              onChange={(e) => setNewItemName(e.target.value)}
+              placeholder={
+                createModal.type === "folder" ? "폴더명 입력" : "문서명 입력"
+              }
+              className="w-full bg-gray-700 text-white px-4 py-2 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 mb-4"
+              onKeyDown={(e) => {
+                if (e.key === "Enter") {
+                  createModal.type === "folder"
+                    ? createFolder()
+                    : createDocument();
+                } else if (e.key === "Escape") {
+                  setCreateModal(null);
+                }
+              }}
+              autoFocus
+            />
+            <div className="flex justify-end gap-2">
+              <button
+                onClick={() => setCreateModal(null)}
+                className="px-4 py-2 bg-gray-600 hover:bg-gray-500 rounded-lg transition-colors"
+              >
+                취소
+              </button>
+              <button
+                onClick={
+                  createModal.type === "folder" ? createFolder : createDocument
+                }
+                disabled={!newItemName.trim()}
+                className="px-4 py-2 bg-blue-600 hover:bg-blue-700 disabled:bg-gray-600 disabled:cursor-not-allowed rounded-lg transition-colors"
+              >
+                생성
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* 좌측 사이드바 */}
+      <div className="w-72 bg-gray-800 border-r border-gray-700 flex flex-col">
         {!user ? (
-          <div className="flex flex-col items-center gap-4">
-            <p className="text-gray-400 mb-4">로그인하여 시작하세요</p>
+          /* 로그인 전 */
+          <div className="flex-1 flex flex-col items-center justify-center p-4">
+            <h1 className="text-xl font-bold mb-6">SyncWhere</h1>
+            <p className="text-gray-400 mb-4 text-sm text-center">
+              로그인하여 시작하세요
+            </p>
             <button
               onClick={handleGoogleLogin}
-              className="flex items-center gap-3 bg-white text-gray-800 px-6 py-3 rounded-lg font-semibold hover:bg-gray-100 transition-colors"
+              className="flex items-center gap-2 bg-white text-gray-800 px-4 py-2 rounded-lg font-semibold hover:bg-gray-100 transition-colors text-sm"
             >
-              <svg className="w-6 h-6" viewBox="0 0 24 24">
+              <svg className="w-5 h-5" viewBox="0 0 24 24">
                 <path
                   fill="#4285F4"
                   d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92c-.26 1.37-1.04 2.53-2.21 3.31v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.09z"
@@ -654,190 +1137,242 @@ export default function Home() {
               Google로 로그인
             </button>
           </div>
+        ) : currentChannel ? (
+          /* 채널 입장 후: 문서 트리 */
+          <div className="flex flex-col h-full">
+            {/* 채널 헤더 */}
+            <div className="p-3 border-b border-gray-700 flex items-center gap-2">
+              <button
+                onClick={leaveChannel}
+                className="p-1 hover:bg-gray-700 rounded transition-colors"
+                title="채널 목록으로"
+              >
+                <svg
+                  className="w-5 h-5"
+                  fill="none"
+                  stroke="currentColor"
+                  viewBox="0 0 24 24"
+                >
+                  <path
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                    strokeWidth={2}
+                    d="M15 19l-7-7 7-7"
+                  />
+                </svg>
+              </button>
+              <span className="font-semibold truncate flex-1">
+                {currentChannel.channelName}
+              </span>
+            </div>
+
+            {/* 문서 트리 */}
+            <div
+              className="flex-1 overflow-y-auto"
+              onContextMenu={(e) => handleContextMenu(e, "root", 0)}
+            >
+              {documents.length === 0 ? (
+                <div className="p-4 text-gray-400 text-sm text-center">
+                  <p>문서가 없습니다</p>
+                  <p className="text-xs mt-1">우클릭하여 생성</p>
+                </div>
+              ) : (
+                <div className="py-2">
+                  {buildDocumentTree(documents).children.map((child) =>
+                    renderTreeNode(child, 0),
+                  )}
+                </div>
+              )}
+            </div>
+          </div>
         ) : (
-          <div className="space-y-6">
-            {/* 사용자 정보 */}
-            <div className="bg-gray-800 rounded-lg p-4">
+          /* 채널 목록 */
+          <div className="flex flex-col h-full">
+            {/* 사용자 정보 헤더 */}
+            <div className="p-3 border-b border-gray-700">
               <div className="flex items-center justify-between">
-                <div>
-                  <p className="text-sm text-gray-400">로그인됨</p>
-                  <p className="font-semibold">{user.email}</p>
+                <div className="flex items-center gap-2 min-w-0">
+                  <div
+                    className={`w-2 h-2 rounded-full shrink-0 ${wsConnected ? "bg-green-500" : isReconnecting ? "bg-yellow-500 animate-pulse" : "bg-red-500"}`}
+                  />
+                  <span className="text-sm truncate">{user.email}</span>
                 </div>
                 <button
                   onClick={handleLogout}
-                  className="bg-red-600 hover:bg-red-700 px-4 py-2 rounded-lg text-sm transition-colors"
+                  className="text-xs text-red-400 hover:text-red-300 shrink-0"
                 >
                   로그아웃
                 </button>
               </div>
             </div>
 
-            {/* WebSocket 상태 */}
-            <div className="bg-gray-800 rounded-lg p-4">
-              <div className="flex items-center justify-between mb-4">
-                <div className="flex items-center gap-2">
-                  <div
-                    className={`w-3 h-3 rounded-full ${
-                      wsConnected
-                        ? "bg-green-500"
-                        : isReconnecting
-                          ? "bg-yellow-500 animate-pulse"
-                          : "bg-red-500"
-                    }`}
-                  />
-                  <span>
-                    WebSocket:{" "}
-                    {wsConnected
-                      ? "연결됨"
-                      : isReconnecting
-                        ? `재연결 중 (${reconnectAttempts}/${WS_MAX_RECONNECT_ATTEMPTS})`
-                        : "연결 안됨"}
-                  </span>
-                </div>
-                {!wsConnected && !isReconnecting && (
-                  <button
-                    onClick={manualReconnect}
-                    className="px-3 py-1 bg-blue-600 hover:bg-blue-700 rounded text-sm transition-colors"
-                  >
-                    재연결
-                  </button>
-                )}
-              </div>
-
-              <button
-                onClick={sendPing}
-                disabled={!wsConnected}
-                className={`w-full py-3 rounded-lg font-semibold transition-colors ${
-                  wsConnected
-                    ? "bg-blue-600 hover:bg-blue-700"
-                    : "bg-gray-600 cursor-not-allowed"
-                }`}
-              >
-                PING 전송
-              </button>
-            </div>
-
             {/* 채널 생성 */}
-            <div className="bg-gray-800 rounded-lg p-4">
-              <h3 className="font-semibold mb-3">채널 생성</h3>
+            <div className="p-3 border-b border-gray-700">
               <div className="flex gap-2">
                 <input
                   type="text"
                   value={createChannelName}
                   onChange={(e) => setCreateChannelName(e.target.value)}
-                  placeholder="생성할 채널명 입력"
+                  placeholder="새 채널명"
                   disabled={!wsConnected}
-                  className="flex-1 bg-gray-700 text-white px-4 py-2 rounded-lg focus:outline-none focus:ring-2 focus:ring-green-500 disabled:opacity-50"
+                  className="flex-1 bg-gray-700 text-white px-3 py-1.5 rounded text-sm focus:outline-none focus:ring-1 focus:ring-green-500 disabled:opacity-50"
                   onKeyDown={(e) => e.key === "Enter" && createChannel()}
                 />
                 <button
                   onClick={createChannel}
-                  disabled={!wsConnected}
-                  className={`px-6 py-2 rounded-lg font-semibold transition-colors ${
-                    wsConnected
-                      ? "bg-green-600 hover:bg-green-700"
-                      : "bg-gray-600 cursor-not-allowed"
-                  }`}
+                  disabled={!wsConnected || !createChannelName.trim()}
+                  className="px-3 py-1.5 bg-green-600 hover:bg-green-700 disabled:bg-gray-600 disabled:cursor-not-allowed rounded text-sm transition-colors"
                 >
                   생성
                 </button>
               </div>
             </div>
 
-            {/* 채널 목록 */}
-            <div className="bg-gray-800 rounded-lg p-4">
-              <div className="flex items-center justify-between mb-3">
-                <h3 className="font-semibold">채널 목록</h3>
-                <button
-                  onClick={requestChannelList}
-                  disabled={!wsConnected}
-                  className={`px-4 py-1 rounded text-sm transition-colors ${
-                    wsConnected
-                      ? "bg-gray-600 hover:bg-gray-500"
-                      : "bg-gray-700 cursor-not-allowed"
-                  }`}
-                >
-                  새로고침
-                </button>
-              </div>
-              <div className="bg-gray-700 rounded-lg max-h-48 overflow-y-auto">
-                {channels.length === 0 ? (
-                  <p className="text-gray-400 text-center py-4">
-                    채널이 없습니다
+            {/* 가입된 채널 */}
+            <div className="flex-1 overflow-y-auto">
+              <div className="p-2">
+                <div className="flex items-center justify-between px-2 py-1">
+                  <span className="text-xs text-gray-400 font-semibold uppercase">
+                    가입된 채널
+                  </span>
+                  <button
+                    onClick={requestChannelList}
+                    disabled={!wsConnected}
+                    className="text-xs text-gray-400 hover:text-white disabled:cursor-not-allowed"
+                  >
+                    새로고침
+                  </button>
+                </div>
+                {channels.filter((c) => c.joined).length === 0 ? (
+                  <p className="text-gray-500 text-sm text-center py-4">
+                    가입된 채널이 없습니다
                   </p>
                 ) : (
-                  <ul className="divide-y divide-gray-600">
-                    {channels.map((channel) => (
-                      <li
+                  channels
+                    .filter((c) => c.joined)
+                    .map((channel) => (
+                      <div
                         key={channel.channelId}
-                        className={`px-4 py-3 flex items-center justify-between hover:bg-gray-600 transition-colors ${
-                          channel.joined ? "" : "cursor-pointer"
-                        }`}
-                        onClick={() =>
-                          !channel.joined && joinChannel(channel.channelName)
-                        }
+                        className="flex items-center justify-between px-2 py-2 hover:bg-gray-700 rounded cursor-pointer group"
+                        onClick={() => enterChannel(channel)}
                       >
-                        <div className="flex flex-col">
-                          <span
-                            className={
-                              channel.joined ? "text-lime-400" : "text-white"
-                            }
-                          >
+                        <div className="flex items-center gap-2 min-w-0">
+                          <span className="text-lime-400">📂</span>
+                          <span className="truncate">
                             {channel.channelName}
-                            {channel.joined && (
-                              <span className="ml-2 text-xs">
-                                {channel.myPermission === 0
-                                  ? "(오너)"
-                                  : "(멤버)"}
-                              </span>
-                            )}
+                          </span>
+                          <span className="text-xs text-gray-500">
+                            {channel.myPermission === 0 ? "(오너)" : ""}
                           </span>
                         </div>
-                        <div className="flex items-center gap-2">
-                          <span className="text-gray-400 text-sm">
-                            {channel.memberCount}명
+                        <button
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            quitChannel(channel.channelName);
+                          }}
+                          className="opacity-0 group-hover:opacity-100 text-xs text-red-400 hover:text-red-300 transition-opacity"
+                        >
+                          탈퇴
+                        </button>
+                      </div>
+                    ))
+                )}
+              </div>
+
+              {/* 미가입 채널 */}
+              <div className="p-2 border-t border-gray-700">
+                <span className="text-xs text-gray-400 font-semibold uppercase px-2">
+                  다른 채널
+                </span>
+                {channels.filter((c) => !c.joined).length === 0 ? (
+                  <p className="text-gray-500 text-sm text-center py-4">
+                    가입 가능한 채널이 없습니다
+                  </p>
+                ) : (
+                  channels
+                    .filter((c) => !c.joined)
+                    .map((channel) => (
+                      <div
+                        key={channel.channelId}
+                        className="flex items-center justify-between px-2 py-2 hover:bg-gray-700 rounded cursor-pointer"
+                        onClick={() => joinChannel(channel.channelName)}
+                      >
+                        <div className="flex items-center gap-2 min-w-0">
+                          <span className="text-gray-400">📁</span>
+                          <span className="truncate text-gray-300">
+                            {channel.channelName}
                           </span>
-                          {channel.joined && (
-                            <button
-                              onClick={(e) => {
-                                e.stopPropagation();
-                                quitChannel(channel.channelName);
-                              }}
-                              className="px-2 py-1 bg-red-600 hover:bg-red-700 text-white text-xs rounded transition-colors"
-                            >
-                              탈퇴
-                            </button>
-                          )}
                         </div>
-                      </li>
-                    ))}
-                  </ul>
+                        <span className="text-xs text-gray-500">
+                          {channel.memberCount}명
+                        </span>
+                      </div>
+                    ))
                 )}
               </div>
             </div>
 
-            {/* 로그 */}
-            <div className="bg-gray-800 rounded-lg p-4">
-              <div className="flex items-center justify-between mb-3">
-                <h3 className="font-semibold">로그</h3>
-                <button
-                  onClick={() => setLogs([])}
-                  className="px-3 py-1 bg-gray-600 hover:bg-gray-500 rounded text-sm transition-colors"
-                >
-                  지우기
-                </button>
-              </div>
-              <div className="bg-black rounded p-3 h-48 overflow-y-auto font-mono text-sm">
-                {logs.length === 0 ? (
-                  <p className="text-gray-500">로그가 없습니다</p>
-                ) : (
-                  logs.map((log, index) => (
-                    <p key={index} className="text-green-400">
-                      {log}
-                    </p>
-                  ))
-                )}
-              </div>
+            {/* 로그 토글 */}
+            <div className="border-t border-gray-700">
+              <button
+                onClick={() => setShowLogs(!showLogs)}
+                className="w-full px-3 py-2 text-left text-sm text-gray-400 hover:bg-gray-700 flex items-center justify-between"
+              >
+                <span>로그 {logs.length > 0 && `(${logs.length})`}</span>
+                <span>{showLogs ? "▼" : "▶"}</span>
+              </button>
+              {showLogs && (
+                <div className="px-2 pb-2">
+                  <div className="bg-black rounded p-2 h-32 overflow-y-auto font-mono text-xs">
+                    {logs.length === 0 ? (
+                      <p className="text-gray-500">로그가 없습니다</p>
+                    ) : (
+                      logs.map((log, index) => (
+                        <p key={index} className="text-green-400">
+                          {log}
+                        </p>
+                      ))
+                    )}
+                  </div>
+                  <button
+                    onClick={() => setLogs([])}
+                    className="mt-1 text-xs text-gray-500 hover:text-gray-300"
+                  >
+                    지우기
+                  </button>
+                </div>
+              )}
+            </div>
+          </div>
+        )}
+      </div>
+
+      {/* 우측 메인 영역 */}
+      <div className="flex-1 flex flex-col">
+        {!user ? (
+          <div className="flex-1 flex items-center justify-center">
+            <div className="text-center text-gray-500">
+              <h2 className="text-2xl font-bold mb-2">SyncWhere</h2>
+              <p>실시간 문서 협업 플랫폼</p>
+            </div>
+          </div>
+        ) : !currentChannel ? (
+          <div className="flex-1 flex items-center justify-center">
+            <div className="text-center text-gray-500">
+              <p className="text-lg">채널을 선택하세요</p>
+              <p className="text-sm mt-2">
+                좌측에서 가입된 채널을 클릭하여 입장합니다
+              </p>
+            </div>
+          </div>
+        ) : (
+          <div className="flex-1 flex items-center justify-center">
+            <div className="text-center text-gray-500">
+              <p className="text-lg">문서 편집 영역</p>
+              <p className="text-sm mt-2">좌측에서 문서를 선택하세요</p>
+              <p className="text-xs mt-4 text-gray-600">
+                (추후 편집기 구현 예정)
+              </p>
             </div>
           </div>
         )}
