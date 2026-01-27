@@ -35,6 +35,13 @@ interface Document {
   snapshotVersion: number;
 }
 
+// 온라인 유저 인터페이스
+interface OnlineUser {
+  id: string;
+  email: string;
+  currentDoc?: string | null;
+}
+
 // 트리 노드 인터페이스
 interface TreeNode {
   name: string;
@@ -63,6 +70,27 @@ export default function Home() {
   const [expandedFolders, setExpandedFolders] = useState<Set<string>>(
     new Set(["root"]),
   );
+  const [onlineUsers, setOnlineUsers] = useState<OnlineUser[]>([]);
+  const [isChannelConnected, setIsChannelConnected] = useState(false);
+  const [channelLogs, setChannelLogs] = useState<string[]>([]);
+  const [showChannelLogs, setShowChannelLogs] = useState(true);
+
+  // 드래그앤드랍 상태
+  const [dragItem, setDragItem] = useState<{
+    type: "folder" | "document";
+    path: string;
+    doc?: Document;
+  } | null>(null);
+  const [dropTarget, setDropTarget] = useState<string | null>(null);
+
+  // 이름 변경 모달 상태
+  const [renameModal, setRenameModal] = useState<{
+    type: "folder" | "document";
+    oldName: string;
+    oldPath: string;
+    doc?: Document;
+  } | null>(null);
+  const [newName, setNewName] = useState("");
 
   // 컨텍스트 메뉴 상태
   const [contextMenu, setContextMenu] = useState<{
@@ -70,6 +98,8 @@ export default function Home() {
     y: number;
     targetPath: string;
     targetDepth: number;
+    isFolder: boolean;
+    doc?: Document;
   } | null>(null);
 
   // 새 항목 생성 모달
@@ -90,6 +120,12 @@ export default function Home() {
   const addLog = useCallback((message: string) => {
     const timestamp = new Date().toLocaleTimeString();
     setLogs((prev) => [...prev.slice(-99), `[${timestamp}] ${message}`]);
+  }, []);
+
+  // 채널 로그 추가 함수
+  const addChannelLog = useCallback((message: string) => {
+    const timestamp = new Date().toLocaleTimeString();
+    setChannelLogs((prev) => [...prev.slice(-99), `[${timestamp}] ${message}`]);
   }, []);
 
   // 재연결 타이머 정리
@@ -433,23 +469,211 @@ export default function Home() {
               case "docList":
                 addLog(`문서 목록 수신: ${data.documents?.length || 0}개`);
                 setDocuments(data.documents || []);
+                addChannelLog(
+                  `📂 문서 목록 로드: ${data.documents?.length || 0}개`,
+                );
+
+                // root에 .option 문서가 없으면 자동 생성 (오너인 경우에만)
+                if (data.channelId && data.documents) {
+                  const hasRootOption = data.documents.some(
+                    (doc: Document) =>
+                      doc.dir === "root" && doc.name === ".option",
+                  );
+                  // currentChannel의 권한 확인 (myPermission === 0이면 오너)
+                  // 참고: 이 시점에서 currentChannel이 설정되어 있어야 함
+                  if (!hasRootOption && ws.readyState === WebSocket.OPEN) {
+                    // 권한 확인을 위해 channels에서 해당 채널 찾기
+                    setChannels((prevChannels) => {
+                      const channel = prevChannels.find(
+                        (c) => c.channelId === data.channelId,
+                      );
+                      if (channel?.myPermission === 0) {
+                        // 오너인 경우 root .option 자동 생성
+                        ws.send(
+                          JSON.stringify({
+                            event: "createDoc",
+                            data: {
+                              time: Date.now(),
+                              channelId: data.channelId,
+                              docName: ".option",
+                              dir: "root",
+                              depth: 0,
+                            },
+                          }),
+                        );
+                        addLog(`root .option 문서 자동 생성 요청`);
+                        addChannelLog(`⚙️ root 설정 파일 생성 중...`);
+                      }
+                      return prevChannels;
+                    });
+                  }
+                }
                 break;
               case "docCreated":
-                addLog(`문서 생성됨: ${data.document?.name}`);
-                showToast(`✅ "${data.document?.name}" 생성됨`, 3000);
-                // 문서 목록에 추가
-                if (data.document) {
+                addLog(`문서 생성됨: ${data.docName || data.document?.name}`);
+                addChannelLog(
+                  `📄 문서 생성됨: ${data.docName || data.document?.name}`,
+                );
+                if (data.docName !== ".option") {
+                  showToast(
+                    `✅ "${data.docName || data.document?.name}" 생성됨`,
+                    3000,
+                  );
+                }
+                // 문서 목록에 추가 (서버 응답 형식에 맞게 처리)
+                if (data.docId) {
+                  const newDoc: Document = {
+                    docId: data.docId,
+                    channelId: data.channelId,
+                    name: data.docName,
+                    dir: data.dir,
+                    depth: data.depth,
+                    createdAt: new Date().toISOString(),
+                    snapshotVersion: data.snapshotVersion || 0,
+                  };
+                  setDocuments((prev) => [...prev, newDoc]);
+                } else if (data.document) {
                   setDocuments((prev) => [...prev, data.document]);
                 }
                 break;
               case "docDeleted":
                 addLog(`문서 삭제됨: docId=${data.docId}`);
+                addChannelLog(`🗑️ 문서 삭제됨: ${data.docName || data.docId}`);
                 showToast(`🗑️ 문서가 삭제되었습니다.`, 3000);
                 // 문서 목록에서 제거
                 setDocuments((prev) =>
                   prev.filter((d) => d.docId !== data.docId),
                 );
                 break;
+
+              // === 채널 입장/퇴장 이벤트 ===
+              case "channelEntered":
+                addLog(`채널 입장 완료: ${data.channelName}`);
+                addChannelLog(`✅ 채널 '${data.channelName}' 입장 완료`);
+                setIsChannelConnected(true);
+                setOnlineUsers(data.onlineUsers || []);
+                break;
+
+              case "channelLeft":
+                addLog(`채널 퇴장: ${data.channelId}`);
+                addChannelLog(`👋 채널에서 퇴장했습니다.`);
+                setIsChannelConnected(false);
+                setOnlineUsers([]);
+                break;
+
+              // === 브로드캐스트 이벤트: 유저 입장/퇴장 ===
+              case "userEntered":
+                addChannelLog(`👤 ${data.email} 님이 입장했습니다.`);
+                setOnlineUsers((prev) => {
+                  if (prev.some((u) => u.id === data.userId)) return prev;
+                  return [...prev, { id: data.userId, email: data.email }];
+                });
+                break;
+
+              case "userLeft":
+                addChannelLog(`👋 ${data.email} 님이 퇴장했습니다.`);
+                setOnlineUsers((prev) =>
+                  prev.filter((u) => u.id !== data.userId),
+                );
+                break;
+
+              // === 브로드캐스트 이벤트: 문서 열람 상태 ===
+              case "userEnteredDoc":
+                addChannelLog(`📖 ${data.email} 님이 문서를 열람 중입니다.`);
+                break;
+
+              case "userLeftDoc":
+                addChannelLog(
+                  `📕 ${data.email} 님이 문서 열람을 종료했습니다.`,
+                );
+                break;
+
+              case "userDocStatusChanged":
+                if (data.status === "viewing") {
+                  addChannelLog(`📖 ${data.email} → ${data.docName}`);
+                } else {
+                  addChannelLog(`📕 ${data.email} 님이 문서 열람 종료`);
+                }
+                setOnlineUsers((prev) =>
+                  prev.map((u) =>
+                    u.id === data.userId ? { ...u, currentDoc: data.docId } : u,
+                  ),
+                );
+                break;
+
+              // === 브로드캐스트 이벤트: 문서 목록 변경 ===
+              case "docListChanged":
+                addChannelLog(
+                  `📋 문서 목록 변경: ${data.action} - ${data.docName}`,
+                );
+                // 문서 목록 새로고침 요청
+                if (ws.readyState === WebSocket.OPEN && data.channelId) {
+                  ws.send(
+                    JSON.stringify({
+                      event: "listDoc",
+                      data: { time: Date.now(), channelId: data.channelId },
+                    }),
+                  );
+                }
+                break;
+
+              // === 브로드캐스트 이벤트: 문서 수정 (이름/경로 변경) ===
+              case "docUpdated":
+                addChannelLog(
+                  `📝 문서 수정됨: ${data.oldName} → ${data.newName}`,
+                );
+                // 문서 목록 갱신
+                setDocuments((prev) =>
+                  prev.map((d) =>
+                    d.docId === data.docId
+                      ? {
+                          ...d,
+                          name: data.newName,
+                          dir: data.newDir,
+                          depth: data.newDepth,
+                        }
+                      : d,
+                  ),
+                );
+                break;
+
+              case "docInfoChanged":
+                addChannelLog(`📝 문서 정보 변경: ${data.newName}`);
+                setDocuments((prev) =>
+                  prev.map((d) =>
+                    d.docId === data.docId
+                      ? {
+                          ...d,
+                          name: data.newName,
+                          dir: data.newDir,
+                          depth: data.newDepth,
+                        }
+                      : d,
+                  ),
+                );
+                break;
+
+              // === 채널 유저 목록 ===
+              case "channelUsers":
+                addChannelLog(`👥 온라인 유저: ${data.users?.length || 0}명`);
+                setOnlineUsers(data.users || []);
+                break;
+
+              case "docUsers":
+                addChannelLog(
+                  `📖 문서 열람 유저: ${data.users?.length || 0}명`,
+                );
+                break;
+
+              // === 문서 열람 입장/퇴장 ===
+              case "docEntered":
+                addChannelLog(`📄 문서 '${data.docName}' 열람 시작`);
+                break;
+
+              case "docLeft":
+                addChannelLog(`📄 문서 열람 종료`);
+                break;
+
               default:
                 addLog(`이벤트 수신: ${eventType} - ${JSON.stringify(data)}`);
             }
@@ -549,6 +773,7 @@ export default function Home() {
     token,
     user,
     addLog,
+    addChannelLog,
     clearReconnectTimeout,
     clearHealthCheckInterval,
     sendHealthCheckPing,
@@ -648,14 +873,30 @@ export default function Home() {
     }
   };
 
-  // 채널 입장 (문서 목록 조회)
+  // 채널 입장 (문서 목록 조회 + 채널 연결)
   const enterChannel = (channel: Channel) => {
     setCurrentChannel(channel);
     setDocuments([]);
     setExpandedFolders(new Set(["root"]));
+    setChannelLogs([]);
+    setOnlineUsers([]);
+    setIsChannelConnected(false);
 
-    // 문서 목록 요청
     if (wsRef.current?.readyState === WebSocket.OPEN) {
+      // 채널 실시간 연결 요청
+      wsRef.current.send(
+        JSON.stringify({
+          event: "enterChannel",
+          data: {
+            time: Date.now(),
+            channelId: channel.channelId,
+          },
+        }),
+      );
+      addLog(`채널 입장 요청: ${channel.channelName}`);
+      addChannelLog(`🔗 채널 '${channel.channelName}' 연결 중...`);
+
+      // 문서 목록 요청
       wsRef.current.send(
         JSON.stringify({
           event: "listDoc",
@@ -671,11 +912,31 @@ export default function Home() {
 
   // 채널 나가기 (목록으로 돌아가기)
   const leaveChannel = () => {
+    // 서버에 채널 퇴장 알림
+    if (wsRef.current?.readyState === WebSocket.OPEN && currentChannel) {
+      wsRef.current.send(
+        JSON.stringify({
+          event: "leaveChannel",
+          data: {
+            time: Date.now(),
+            channelId: currentChannel.channelId,
+          },
+        }),
+      );
+      addLog(`채널 퇴장 요청: ${currentChannel.channelName}`);
+    }
+
     setCurrentChannel(null);
     setDocuments([]);
     setExpandedFolders(new Set(["root"]));
     setContextMenu(null);
     setCreateModal(null);
+    setRenameModal(null);
+    setOnlineUsers([]);
+    setIsChannelConnected(false);
+    setChannelLogs([]);
+    setDragItem(null);
+    setDropTarget(null);
   };
 
   // 폴더 토글
@@ -691,11 +952,13 @@ export default function Home() {
     });
   };
 
-  // 우클릭 컨텍스트 메뉴
+  // 우클릭 컨텍스트 메뉴 (폴더/문서 구분)
   const handleContextMenu = (
     e: React.MouseEvent,
     targetPath: string,
     targetDepth: number,
+    isFolder: boolean = true,
+    doc?: Document,
   ) => {
     e.preventDefault();
     e.stopPropagation();
@@ -704,6 +967,8 @@ export default function Home() {
       y: e.clientY,
       targetPath,
       targetDepth,
+      isFolder,
+      doc,
     });
   };
 
@@ -722,6 +987,201 @@ export default function Home() {
     });
     setNewItemName("");
     setContextMenu(null);
+  };
+
+  // 이름 변경 모달 열기
+  const openRenameModal = () => {
+    if (!contextMenu) return;
+    const pathParts = contextMenu.targetPath.split("/");
+    const oldName = pathParts[pathParts.length - 1];
+
+    setRenameModal({
+      type: contextMenu.isFolder ? "folder" : "document",
+      oldName,
+      oldPath: contextMenu.targetPath,
+      doc: contextMenu.doc,
+    });
+    setNewName(oldName);
+    setContextMenu(null);
+  };
+
+  // 이름 변경 실행
+  const executeRename = () => {
+    if (!renameModal || !currentChannel || !newName.trim()) return;
+
+    if (renameModal.type === "document" && renameModal.doc) {
+      // 문서 이름 변경
+      if (wsRef.current?.readyState === WebSocket.OPEN) {
+        wsRef.current.send(
+          JSON.stringify({
+            event: "updateDoc",
+            data: {
+              time: Date.now(),
+              channelId: currentChannel.channelId,
+              docId: renameModal.doc.docId,
+              newName: newName.trim(),
+            },
+          }),
+        );
+        addLog(`문서 이름 변경 요청: ${renameModal.oldName} → ${newName}`);
+        addChannelLog(`📝 이름 변경: ${renameModal.oldName} → ${newName}`);
+      }
+    } else if (renameModal.type === "folder") {
+      // 폴더 이름 변경 = 해당 폴더 경로의 모든 문서 경로 업데이트
+      const oldPath = renameModal.oldPath;
+      const pathParts = oldPath.split("/");
+      const newPath =
+        pathParts.length > 1
+          ? [...pathParts.slice(0, -1), newName.trim()].join("/")
+          : newName.trim();
+
+      // 해당 폴더와 하위 문서들 모두 업데이트
+      const docsToUpdate = documents.filter(
+        (doc) => doc.dir === oldPath || doc.dir.startsWith(`${oldPath}/`),
+      );
+
+      docsToUpdate.forEach((doc) => {
+        const newDir = doc.dir.replace(oldPath, newPath);
+        if (wsRef.current?.readyState === WebSocket.OPEN) {
+          wsRef.current.send(
+            JSON.stringify({
+              event: "updateDoc",
+              data: {
+                time: Date.now(),
+                channelId: currentChannel.channelId,
+                docId: doc.docId,
+                newDir: newDir,
+              },
+            }),
+          );
+        }
+      });
+
+      addLog(`폴더 이름 변경 요청: ${oldPath} → ${newPath}`);
+      addChannelLog(`📁 폴더 이름 변경: ${renameModal.oldName} → ${newName}`);
+    }
+
+    setRenameModal(null);
+    setNewName("");
+  };
+
+  // 드래그 시작
+  const handleDragStart = (
+    e: React.DragEvent,
+    type: "folder" | "document",
+    path: string,
+    doc?: Document,
+  ) => {
+    e.stopPropagation();
+    setDragItem({ type, path, doc });
+    e.dataTransfer.effectAllowed = "move";
+  };
+
+  // 드래그 종료
+  const handleDragEnd = () => {
+    setDragItem(null);
+    setDropTarget(null);
+  };
+
+  // 드래그 오버 (드롭 대상 위에 있을 때)
+  const handleDragOver = (e: React.DragEvent, targetPath: string) => {
+    e.preventDefault();
+    e.stopPropagation();
+    if (dragItem && dragItem.path !== targetPath) {
+      setDropTarget(targetPath);
+      e.dataTransfer.dropEffect = "move";
+    }
+  };
+
+  // 드래그 리브 (드롭 대상을 벗어났을 때)
+  const handleDragLeave = (e: React.DragEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setDropTarget(null);
+  };
+
+  // 드롭 실행
+  const handleDrop = (e: React.DragEvent, targetPath: string) => {
+    e.preventDefault();
+    e.stopPropagation();
+
+    if (!dragItem || !currentChannel) {
+      setDragItem(null);
+      setDropTarget(null);
+      return;
+    }
+
+    // 자기 자신에게 드롭하거나 자신의 하위 폴더에 드롭하면 무시
+    if (
+      dragItem.path === targetPath ||
+      targetPath.startsWith(`${dragItem.path}/`)
+    ) {
+      setDragItem(null);
+      setDropTarget(null);
+      return;
+    }
+
+    const itemName = dragItem.path.split("/").pop() || "";
+
+    if (dragItem.type === "document" && dragItem.doc) {
+      // 문서 이동
+      const newDir = targetPath;
+      const newDepth =
+        targetPath === "root" ? 1 : targetPath.split("/").length + 1;
+
+      if (wsRef.current?.readyState === WebSocket.OPEN) {
+        wsRef.current.send(
+          JSON.stringify({
+            event: "updateDoc",
+            data: {
+              time: Date.now(),
+              channelId: currentChannel.channelId,
+              docId: dragItem.doc.docId,
+              newDir: newDir,
+              newDepth: newDepth,
+            },
+          }),
+        );
+        addLog(`문서 이동: ${dragItem.path} → ${targetPath}/${itemName}`);
+        addChannelLog(`📄 문서 이동: ${itemName} → ${targetPath}`);
+      }
+    } else if (dragItem.type === "folder") {
+      // 폴더 이동 = 해당 폴더 경로의 모든 문서 경로 업데이트
+      const oldPath = dragItem.path;
+      const folderName = oldPath.split("/").pop() || "";
+      const newBasePath =
+        targetPath === "root" ? folderName : `${targetPath}/${folderName}`;
+
+      const docsToUpdate = documents.filter(
+        (doc) => doc.dir === oldPath || doc.dir.startsWith(`${oldPath}/`),
+      );
+
+      docsToUpdate.forEach((doc) => {
+        const newDir = doc.dir.replace(oldPath, newBasePath);
+        const newDepth = newDir.split("/").length;
+
+        if (wsRef.current?.readyState === WebSocket.OPEN) {
+          wsRef.current.send(
+            JSON.stringify({
+              event: "updateDoc",
+              data: {
+                time: Date.now(),
+                channelId: currentChannel.channelId,
+                docId: doc.docId,
+                newDir: newDir,
+                newDepth: newDepth,
+              },
+            }),
+          );
+        }
+      });
+
+      addLog(`폴더 이동: ${oldPath} → ${newBasePath}`);
+      addChannelLog(`📁 폴더 이동: ${folderName} → ${targetPath}`);
+    }
+
+    setDragItem(null);
+    setDropTarget(null);
   };
 
   // 폴더 생성
@@ -824,22 +1284,38 @@ export default function Home() {
     addLog(`폴더 삭제 요청: ${folderPath} (${docsToDelete.length}개 문서)`);
   };
 
-  // 트리 노드 렌더링
+  // 트리 노드 렌더링 (드래그앤드랍 지원)
   const renderTreeNode = (
     node: TreeNode,
     level: number = 0,
   ): React.ReactNode => {
     const isExpanded = expandedFolders.has(node.path);
     const paddingLeft = level * 16;
+    const isDragging = dragItem?.path === node.path;
+    const isDropTarget = dropTarget === node.path;
 
     if (node.isFolder) {
       return (
         <div key={node.path}>
           <div
-            className="flex items-center py-1 px-2 hover:bg-gray-700 cursor-pointer select-none"
+            className={`flex items-center py-1 px-2 cursor-pointer select-none transition-colors ${
+              isDragging
+                ? "opacity-50 bg-gray-600"
+                : isDropTarget
+                  ? "bg-blue-600/30 border border-blue-500 border-dashed"
+                  : "hover:bg-gray-700"
+            }`}
             style={{ paddingLeft: `${paddingLeft + 8}px` }}
             onClick={() => toggleFolder(node.path)}
-            onContextMenu={(e) => handleContextMenu(e, node.path, node.depth)}
+            onContextMenu={(e) =>
+              handleContextMenu(e, node.path, node.depth, true)
+            }
+            draggable={node.path !== "root"}
+            onDragStart={(e) => handleDragStart(e, "folder", node.path)}
+            onDragEnd={handleDragEnd}
+            onDragOver={(e) => handleDragOver(e, node.path)}
+            onDragLeave={handleDragLeave}
+            onDrop={(e) => handleDrop(e, node.path)}
           >
             <span className="mr-1 text-xs text-gray-400">
               {isExpanded ? "▼" : "▶"}
@@ -859,16 +1335,16 @@ export default function Home() {
     return (
       <div
         key={node.path}
-        className="flex items-center py-1 px-2 hover:bg-gray-700 cursor-pointer select-none group"
+        className={`flex items-center py-1 px-2 cursor-pointer select-none group transition-colors ${
+          isDragging ? "opacity-50 bg-gray-600" : "hover:bg-gray-700"
+        }`}
         style={{ paddingLeft: `${paddingLeft + 20}px` }}
-        onContextMenu={(e) => {
-          e.preventDefault();
-          e.stopPropagation();
-          // 문서 삭제 확인
-          if (node.doc && confirm(`"${node.name}" 문서를 삭제하시겠습니까?`)) {
-            deleteDocument(node.doc.docId);
-          }
-        }}
+        onContextMenu={(e) =>
+          handleContextMenu(e, node.path, node.depth, false, node.doc)
+        }
+        draggable
+        onDragStart={(e) => handleDragStart(e, "document", node.path, node.doc)}
+        onDragEnd={handleDragEnd}
       >
         <span className="mr-1">📄</span>
         <span className="text-sm text-gray-300 truncate flex-1">
@@ -1011,42 +1487,131 @@ export default function Home() {
       {/* 컨텍스트 메뉴 */}
       {contextMenu && (
         <div
-          className="fixed bg-gray-800 border border-gray-600 rounded-lg shadow-xl py-1 z-50"
+          className="fixed bg-gray-800 border border-gray-600 rounded-lg shadow-xl py-1 z-50 min-w-[160px]"
           style={{ left: contextMenu.x, top: contextMenu.y }}
           onClick={(e) => e.stopPropagation()}
         >
-          <button
-            onClick={() => openCreateModal("folder")}
-            className="w-full px-4 py-2 text-left text-sm hover:bg-gray-700 flex items-center gap-2"
-          >
-            📁 새 폴더
-          </button>
-          <button
-            onClick={() => openCreateModal("document")}
-            className="w-full px-4 py-2 text-left text-sm hover:bg-gray-700 flex items-center gap-2"
-          >
-            📄 새 문서
-          </button>
-          {contextMenu.targetPath !== "root" && (
+          {contextMenu.isFolder ? (
             <>
+              <button
+                onClick={() => openCreateModal("folder")}
+                className="w-full px-4 py-2 text-left text-sm hover:bg-gray-700 flex items-center gap-2"
+              >
+                📁 새 폴더
+              </button>
+              <button
+                onClick={() => openCreateModal("document")}
+                className="w-full px-4 py-2 text-left text-sm hover:bg-gray-700 flex items-center gap-2"
+              >
+                📄 새 문서
+              </button>
+              {contextMenu.targetPath !== "root" && (
+                <>
+                  <div className="border-t border-gray-600 my-1" />
+                  <button
+                    onClick={openRenameModal}
+                    className="w-full px-4 py-2 text-left text-sm hover:bg-gray-700 flex items-center gap-2"
+                  >
+                    ✏️ 이름 변경
+                  </button>
+                  <button
+                    onClick={() => {
+                      if (
+                        confirm(
+                          `"${contextMenu.targetPath.split("/").pop()}" 폴더를 삭제하시겠습니까?\n(하위 모든 내용이 삭제됩니다)`,
+                        )
+                      ) {
+                        deleteFolder(contextMenu.targetPath);
+                      }
+                      setContextMenu(null);
+                    }}
+                    className="w-full px-4 py-2 text-left text-sm hover:bg-red-600 text-red-400 hover:text-white flex items-center gap-2"
+                  >
+                    🗑️ 폴더 삭제
+                  </button>
+                </>
+              )}
+            </>
+          ) : (
+            <>
+              <button
+                onClick={openRenameModal}
+                className="w-full px-4 py-2 text-left text-sm hover:bg-gray-700 flex items-center gap-2"
+              >
+                ✏️ 이름 변경
+              </button>
               <div className="border-t border-gray-600 my-1" />
               <button
                 onClick={() => {
                   if (
+                    contextMenu.doc &&
                     confirm(
-                      `"${contextMenu.targetPath}" 폴더를 삭제하시겠습니까?\n(하위 모든 내용이 삭제됩니다)`,
+                      `"${contextMenu.doc.name}" 문서를 삭제하시겠습니까?`,
                     )
                   ) {
-                    deleteFolder(contextMenu.targetPath);
+                    deleteDocument(contextMenu.doc.docId);
                   }
                   setContextMenu(null);
                 }}
                 className="w-full px-4 py-2 text-left text-sm hover:bg-red-600 text-red-400 hover:text-white flex items-center gap-2"
               >
-                🗑️ 폴더 삭제
+                🗑️ 문서 삭제
               </button>
             </>
           )}
+        </div>
+      )}
+
+      {/* 이름 변경 모달 */}
+      {renameModal && (
+        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
+          <div
+            className="bg-gray-800 rounded-lg p-6 w-96 shadow-xl"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <h3 className="text-lg font-semibold mb-4">
+              {renameModal.type === "folder"
+                ? "📁 폴더 이름 변경"
+                : "📄 문서 이름 변경"}
+            </h3>
+            <p className="text-sm text-gray-400 mb-2">
+              현재: {renameModal.oldName}
+            </p>
+            <input
+              type="text"
+              value={newName}
+              onChange={(e) => setNewName(e.target.value)}
+              placeholder="새 이름 입력"
+              className="w-full bg-gray-700 text-white px-4 py-2 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 mb-4"
+              onKeyDown={(e) => {
+                if (e.key === "Enter") {
+                  executeRename();
+                } else if (e.key === "Escape") {
+                  setRenameModal(null);
+                  setNewName("");
+                }
+              }}
+              autoFocus
+            />
+            <div className="flex justify-end gap-2">
+              <button
+                onClick={() => {
+                  setRenameModal(null);
+                  setNewName("");
+                }}
+                className="px-4 py-2 bg-gray-600 hover:bg-gray-500 rounded-lg transition-colors"
+              >
+                취소
+              </button>
+              <button
+                onClick={executeRename}
+                disabled={!newName.trim() || newName === renameModal.oldName}
+                className="px-4 py-2 bg-blue-600 hover:bg-blue-700 disabled:bg-gray-600 disabled:cursor-not-allowed rounded-lg transition-colors"
+              >
+                변경
+              </button>
+            </div>
+          </div>
         </div>
       )}
 
@@ -1141,46 +1706,104 @@ export default function Home() {
           /* 채널 입장 후: 문서 트리 */
           <div className="flex flex-col h-full">
             {/* 채널 헤더 */}
-            <div className="p-3 border-b border-gray-700 flex items-center gap-2">
-              <button
-                onClick={leaveChannel}
-                className="p-1 hover:bg-gray-700 rounded transition-colors"
-                title="채널 목록으로"
-              >
-                <svg
-                  className="w-5 h-5"
-                  fill="none"
-                  stroke="currentColor"
-                  viewBox="0 0 24 24"
+            <div className="p-3 border-b border-gray-700">
+              <div className="flex items-center gap-2">
+                <button
+                  onClick={leaveChannel}
+                  className="p-1 hover:bg-gray-700 rounded transition-colors"
+                  title="채널 목록으로"
                 >
-                  <path
-                    strokeLinecap="round"
-                    strokeLinejoin="round"
-                    strokeWidth={2}
-                    d="M15 19l-7-7 7-7"
-                  />
-                </svg>
-              </button>
-              <span className="font-semibold truncate flex-1">
-                {currentChannel.channelName}
-              </span>
+                  <svg
+                    className="w-5 h-5"
+                    fill="none"
+                    stroke="currentColor"
+                    viewBox="0 0 24 24"
+                  >
+                    <path
+                      strokeLinecap="round"
+                      strokeLinejoin="round"
+                      strokeWidth={2}
+                      d="M15 19l-7-7 7-7"
+                    />
+                  </svg>
+                </button>
+                <div
+                  className={`w-2 h-2 rounded-full shrink-0 ${
+                    isChannelConnected
+                      ? "bg-green-500"
+                      : "bg-yellow-500 animate-pulse"
+                  }`}
+                  title={isChannelConnected ? "채널 연결됨" : "연결 중..."}
+                />
+                <span className="font-semibold truncate flex-1">
+                  {currentChannel.channelName}
+                </span>
+                <span className="text-xs text-gray-400">
+                  👥 {onlineUsers.length}
+                </span>
+              </div>
             </div>
 
             {/* 문서 트리 */}
             <div
               className="flex-1 overflow-y-auto"
-              onContextMenu={(e) => handleContextMenu(e, "root", 0)}
+              onContextMenu={(e) => handleContextMenu(e, "root", 0, true)}
+              onDragOver={(e) => handleDragOver(e, "root")}
+              onDragLeave={handleDragLeave}
+              onDrop={(e) => handleDrop(e, "root")}
             >
-              {documents.length === 0 ? (
-                <div className="p-4 text-gray-400 text-sm text-center">
-                  <p>문서가 없습니다</p>
-                  <p className="text-xs mt-1">우클릭하여 생성</p>
-                </div>
-              ) : (
-                <div className="py-2">
-                  {buildDocumentTree(documents).children.map((child) =>
-                    renderTreeNode(child, 0),
-                  )}
+              {/* root 드롭 영역 표시 */}
+              <div
+                className={`transition-colors ${
+                  dropTarget === "root" ? "bg-blue-600/20" : ""
+                }`}
+              >
+                {documents.length === 0 ? (
+                  <div className="p-4 text-gray-400 text-sm text-center">
+                    <p>문서가 없습니다</p>
+                    <p className="text-xs mt-1">우클릭하여 생성</p>
+                  </div>
+                ) : (
+                  <div className="py-2">
+                    {buildDocumentTree(documents).children.map((child) =>
+                      renderTreeNode(child, 0),
+                    )}
+                  </div>
+                )}
+              </div>
+            </div>
+
+            {/* 채널 로그 (디버깅용) */}
+            <div className="border-t border-gray-700">
+              <button
+                onClick={() => setShowChannelLogs(!showChannelLogs)}
+                className="w-full px-3 py-2 text-left text-xs text-gray-400 hover:bg-gray-700 flex items-center justify-between"
+              >
+                <span>
+                  📋 채널 로그{" "}
+                  {channelLogs.length > 0 && `(${channelLogs.length})`}
+                </span>
+                <span>{showChannelLogs ? "▼" : "▶"}</span>
+              </button>
+              {showChannelLogs && (
+                <div className="px-2 pb-2">
+                  <div className="bg-black rounded p-2 h-28 overflow-y-auto font-mono text-xs">
+                    {channelLogs.length === 0 ? (
+                      <p className="text-gray-500">로그가 없습니다</p>
+                    ) : (
+                      channelLogs.map((log, index) => (
+                        <p key={index} className="text-cyan-400">
+                          {log}
+                        </p>
+                      ))
+                    )}
+                  </div>
+                  <button
+                    onClick={() => setChannelLogs([])}
+                    className="mt-1 text-xs text-gray-500 hover:text-gray-300"
+                  >
+                    지우기
+                  </button>
                 </div>
               )}
             </div>
