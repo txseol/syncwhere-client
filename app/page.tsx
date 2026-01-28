@@ -796,9 +796,12 @@ export default function Home() {
                 // 서버에서 브로드캐스트된 LSEQ 연산 적용
                 // currentDocRef를 사용하여 클로저 문제 해결
                 if (data.docId === currentDocRef.current?.docId) {
-                  // 현재 커서 위치 저장
-                  const savedCursorPos =
-                    textareaRef.current?.selectionStart || 0;
+                  // 자신의 편집인지 확인 (자신의 편집이면 커서 조정 안함)
+                  const isMyEdit = data.editedBy === user?.userid;
+                  // 다른 사람의 편집인 경우에만 커서 위치 저장
+                  const savedCursorPos = !isMyEdit
+                    ? textareaRef.current?.selectionStart || 0
+                    : 0;
 
                   if (data.op === "insert") {
                     // 삽입 연산 적용
@@ -828,20 +831,23 @@ export default function Home() {
                     // 확정 콘텐츠 업데이트
                     lastConfirmedContentRef.current = newContent;
 
-                    // 커서 위치 복원 (삽입 위치가 커서 앞이면 커서도 이동)
-                    requestAnimationFrame(() => {
-                      if (textareaRef.current) {
-                        const newCursorPos =
-                          insertPos <= savedCursorPos
-                            ? savedCursorPos + 1
-                            : savedCursorPos;
-                        textareaRef.current.setSelectionRange(
-                          newCursorPos,
-                          newCursorPos,
-                        );
-                        lastCursorPosRef.current = newCursorPos;
-                      }
-                    });
+                    // 다른 사람의 편집인 경우에만 커서 위치 조정
+                    if (!isMyEdit) {
+                      requestAnimationFrame(() => {
+                        if (textareaRef.current) {
+                          // 삽입 위치가 커서 앞이면 커서도 이동
+                          const newCursorPos =
+                            insertPos <= savedCursorPos
+                              ? savedCursorPos + 1
+                              : savedCursorPos;
+                          textareaRef.current.setSelectionRange(
+                            newCursorPos,
+                            newCursorPos,
+                          );
+                          lastCursorPosRef.current = newCursorPos;
+                        }
+                      });
+                    }
 
                     addChannelLog(
                       `✏️ 삽입: "${data.char}" (by ${data.editedBy?.slice(0, 8) || "unknown"})`,
@@ -851,6 +857,7 @@ export default function Home() {
                     const currentChars = [...docCharsRef.current];
                     const idx = currentChars.findIndex((c) => c.id === data.id);
                     if (idx !== -1) {
+                      const deletePos = idx;
                       currentChars.splice(idx, 1);
                       // ref와 state 모두 업데이트
                       docCharsRef.current = currentChars;
@@ -863,20 +870,23 @@ export default function Home() {
                       // 확정 콘텐츠 업데이트
                       lastConfirmedContentRef.current = newContent;
 
-                      // 커서 위치 복원 (삭제 위치가 커서 앞이면 커서도 조정)
-                      requestAnimationFrame(() => {
-                        if (textareaRef.current) {
-                          const newCursorPos =
-                            idx < savedCursorPos
-                              ? Math.max(0, savedCursorPos - 1)
-                              : savedCursorPos;
-                          textareaRef.current.setSelectionRange(
-                            newCursorPos,
-                            newCursorPos,
-                          );
-                          lastCursorPosRef.current = newCursorPos;
-                        }
-                      });
+                      // 다른 사람의 편집인 경우에만 커서 위치 조정
+                      if (!isMyEdit) {
+                        requestAnimationFrame(() => {
+                          if (textareaRef.current) {
+                            // 삭제 위치가 커서 앞이면 커서도 조정
+                            const newCursorPos =
+                              deletePos < savedCursorPos
+                                ? Math.max(0, savedCursorPos - 1)
+                                : savedCursorPos;
+                            textareaRef.current.setSelectionRange(
+                              newCursorPos,
+                              newCursorPos,
+                            );
+                            lastCursorPosRef.current = newCursorPos;
+                          }
+                        });
+                      }
                     }
                     addChannelLog(
                       `🗑️ 삭제: ID ${data.id} (by ${data.editedBy?.slice(0, 8) || "unknown"})`,
@@ -895,9 +905,12 @@ export default function Home() {
                   data.docId === currentDocRef.current?.docId &&
                   data.operations
                 ) {
-                  // 현재 커서 위치 저장
-                  const savedCursorPos =
-                    textareaRef.current?.selectionStart || 0;
+                  // 자신의 편집인지 확인 (자신의 편집이면 커서 조정 안함)
+                  const isMyEdit = data.editedBy === user?.userid;
+                  // 다른 사람의 편집인 경우에만 커서 위치 저장
+                  const savedCursorPos = !isMyEdit
+                    ? textareaRef.current?.selectionStart || 0
+                    : 0;
                   let cursorAdjustment = 0;
 
                   const currentChars = [...docCharsRef.current];
@@ -915,8 +928,11 @@ export default function Home() {
                           hi = mid;
                         }
                       }
-                      // 삽입 위치가 커서 앞이면 커서 조정
-                      if (lo <= savedCursorPos + cursorAdjustment) {
+                      // 다른 사람의 편집인 경우에만 커서 조정 계산
+                      if (
+                        !isMyEdit &&
+                        lo <= savedCursorPos + cursorAdjustment
+                      ) {
                         cursorAdjustment++;
                       }
                       currentChars.splice(lo, 0, { id: op.id, char: op.char });
@@ -924,8 +940,11 @@ export default function Home() {
                       // 삭제 연산 적용
                       const idx = currentChars.findIndex((c) => c.id === op.id);
                       if (idx !== -1) {
-                        // 삭제 위치가 커서 앞이면 커서 조정
-                        if (idx < savedCursorPos + cursorAdjustment) {
+                        // 다른 사람의 편집인 경우에만 커서 조정 계산
+                        if (
+                          !isMyEdit &&
+                          idx < savedCursorPos + cursorAdjustment
+                        ) {
                           cursorAdjustment--;
                         }
                         currentChars.splice(idx, 1);
@@ -936,29 +955,31 @@ export default function Home() {
                   // ref와 state 모두 업데이트
                   docCharsRef.current = currentChars;
                   setDocChars(currentChars);
-                  // content 업데이트 (커서 위치 유지)
+                  // content 업데이트
                   const newContent = currentChars.map((c) => c.char).join("");
                   setDocContent(newContent);
                   // 확정 콘텐츠도 업데이트
                   lastConfirmedContentRef.current = newContent;
 
-                  // 커서 위치 복원
-                  requestAnimationFrame(() => {
-                    if (textareaRef.current) {
-                      const newCursorPos = Math.max(
-                        0,
-                        Math.min(
-                          savedCursorPos + cursorAdjustment,
-                          newContent.length,
-                        ),
-                      );
-                      textareaRef.current.setSelectionRange(
-                        newCursorPos,
-                        newCursorPos,
-                      );
-                      lastCursorPosRef.current = newCursorPos;
-                    }
-                  });
+                  // 다른 사람의 편집인 경우에만 커서 위치 복원
+                  if (!isMyEdit) {
+                    requestAnimationFrame(() => {
+                      if (textareaRef.current) {
+                        const newCursorPos = Math.max(
+                          0,
+                          Math.min(
+                            savedCursorPos + cursorAdjustment,
+                            newContent.length,
+                          ),
+                        );
+                        textareaRef.current.setSelectionRange(
+                          newCursorPos,
+                          newCursorPos,
+                        );
+                        lastCursorPosRef.current = newCursorPos;
+                      }
+                    });
+                  }
 
                   addChannelLog(
                     `✏️ Batch: ${data.operations.length}개 연산 (by ${data.editedBy?.slice(0, 8) || "unknown"})`,
