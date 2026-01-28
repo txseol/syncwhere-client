@@ -2171,56 +2171,75 @@ export default function Home() {
       // 변경 없음
       if (deleteCount === 0 && insertText.length === 0) return;
 
-      // 삭제 후의 chars 상태 계산
-      const adjustedChars = [...chars];
-      const deleteIds: string[] = [];
+      // === 삭제할 문자 정보 수집 (청크 ID + offset) ===
+      interface DeleteInfo {
+        id: string;
+        offset: number;
+      }
+      const deleteInfos: DeleteInfo[] = [];
 
-      // 삭제할 ID 수집 (뒤에서부터)
-      for (let i = deleteEnd - 1; i >= deleteStart; i--) {
+      for (let i = deleteStart; i < deleteEnd; i++) {
         if (i < chars.length && chars[i]) {
-          deleteIds.push(chars[i].id);
+          deleteInfos.push({
+            id: chars[i].id,
+            offset: chars[i].offset,
+          });
         }
       }
 
-      // adjustedChars에서 삭제 반영
+      // 삭제 후의 chars 상태 계산 (삽입 위치 결정용)
+      const adjustedChars = [...chars];
       if (deleteCount > 0) {
         adjustedChars.splice(deleteStart, deleteCount);
       }
 
-      // leftId/rightId 계산 (삽입 위치 기준)
-      const leftId =
-        insertStart > 0 ? adjustedChars[insertStart - 1]?.id || null : null;
-      const rightId =
-        insertStart < adjustedChars.length
-          ? adjustedChars[insertStart]?.id || null
-          : null;
+      // === 삽입 위치 계산 (청크 ID + offset) ===
+      // 왼쪽 문자와 오른쪽 문자 정보
+      const leftChar = insertStart > 0 ? adjustedChars[insertStart - 1] : null;
+      const rightChar =
+        insertStart < adjustedChars.length ? adjustedChars[insertStart] : null;
 
-      // === 청크 기반 전송 (서버 최적화 활용) ===
+      const leftId = leftChar?.id || null;
+      const rightId = rightChar?.id || null;
+
+      // 청크 내부 삽입 여부 판단 및 offset 계산
+      // leftId === rightId이면 같은 청크 내부 삽입 → offset 필요
+      let insertOffset: number | null = null;
+      if (leftId && rightId && leftId === rightId) {
+        // 같은 청크 내부 삽입: leftChar의 offset + 1 위치에 삽입
+        insertOffset = (leftChar?.offset ?? 0) + 1;
+      }
+
+      // === 청크 기반 전송 ===
 
       // Case 1: 삭제만 있는 경우
-      if (deleteIds.length > 0 && insertText.length === 0) {
-        if (deleteIds.length === 1) {
-          // 단일 삭제
+      if (deleteInfos.length > 0 && insertText.length === 0) {
+        // 같은 청크의 연속 삭제는 하나의 trim 연산으로 최적화 가능
+        // 여기서는 단순히 개별 삭제로 처리 (서버에서 최적화)
+        if (deleteInfos.length === 1) {
+          // 단일 삭제 (offset 포함)
           wsRef.current.send(
             JSON.stringify({
               event: "editDoc",
               data: {
                 docId: currentDocRef.current.docId,
                 intent: "delete",
-                id: deleteIds[0],
+                id: deleteInfos[0].id,
+                offset: deleteInfos[0].offset,
               },
             }),
           );
         } else {
-          // 복수 삭제 - batch
+          // 복수 삭제 - batch (각각 offset 포함)
           wsRef.current.send(
             JSON.stringify({
               event: "editDocBatch",
               data: {
                 docId: currentDocRef.current.docId,
-                operations: deleteIds.map((id) => ({
+                operations: deleteInfos.map((info) => ({
                   intent: "delete",
-                  id,
+                  id: info.id,
+                  offset: info.offset,
                 })),
               },
             }),
@@ -2228,56 +2247,90 @@ export default function Home() {
         }
       }
       // Case 2: 삽입만 있는 경우
-      else if (deleteIds.length === 0 && insertText.length > 0) {
+      else if (deleteInfos.length === 0 && insertText.length > 0) {
         if (insertText.length === 1) {
           // 단일 삽입
+          const insertData: {
+            docId: string;
+            intent: string;
+            leftId: string | null;
+            rightId: string | null;
+            value: string;
+            offset?: number;
+          } = {
+            docId: currentDocRef.current.docId,
+            intent: "insert",
+            leftId,
+            rightId,
+            value: insertText,
+          };
+          // 청크 내부 삽입이면 offset 추가
+          if (insertOffset !== null) {
+            insertData.offset = insertOffset;
+          }
           wsRef.current.send(
             JSON.stringify({
               event: "editDoc",
-              data: {
-                docId: currentDocRef.current.docId,
-                intent: "insert",
-                leftId,
-                rightId,
-                value: insertText,
-              },
+              data: insertData,
             }),
           );
         } else {
-          // 청크 삽입 (새로운 text 방식 사용)
+          // 청크 삽입 (text 방식)
+          const batchData: {
+            docId: string;
+            text: string;
+            leftId: string | null;
+            rightId: string | null;
+            offset?: number;
+          } = {
+            docId: currentDocRef.current.docId,
+            text: insertText,
+            leftId,
+            rightId,
+          };
+          // 청크 내부 삽입이면 offset 추가
+          if (insertOffset !== null) {
+            batchData.offset = insertOffset;
+          }
           wsRef.current.send(
             JSON.stringify({
               event: "editDocBatch",
-              data: {
-                docId: currentDocRef.current.docId,
-                text: insertText,
-                leftId,
-                rightId,
-              },
+              data: batchData,
             }),
           );
         }
       }
       // Case 3: 삭제 + 삽입 (교체)
-      else if (deleteIds.length > 0 && insertText.length > 0) {
+      else if (deleteInfos.length > 0 && insertText.length > 0) {
         // 삭제 operations + 청크 삽입을 함께 전송
-        const operations = deleteIds.map((id) => ({
+        const operations = deleteInfos.map((info) => ({
           intent: "delete" as const,
-          id,
+          id: info.id,
+          offset: info.offset,
         }));
 
-        // 삽입은 text 방식으로 별도 전송하거나, operations에 추가
-        // 서버가 operations 처리 후 text를 처리하므로 함께 전송 가능
+        const batchData: {
+          docId: string;
+          operations: { intent: "delete"; id: string; offset: number }[];
+          text: string;
+          leftId: string | null;
+          rightId: string | null;
+          offset?: number;
+        } = {
+          docId: currentDocRef.current.docId,
+          operations,
+          text: insertText,
+          leftId,
+          rightId,
+        };
+        // 청크 내부 삽입이면 offset 추가
+        if (insertOffset !== null) {
+          batchData.offset = insertOffset;
+        }
         wsRef.current.send(
           JSON.stringify({
             event: "editDocBatch",
-            data: {
-              docId: currentDocRef.current.docId,
-              operations,
-              text: insertText,
-              leftId,
-              rightId,
-            },
+            data: batchData,
           }),
         );
       }
