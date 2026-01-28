@@ -141,6 +141,8 @@ export default function Home() {
   const toastTimeoutRef = useRef<NodeJS.Timeout | null>(null);
   const mountedRef = useRef(true);
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
+  const currentDocRef = useRef<Document | null>(null); // 현재 문서 참조 (클로저 문제 해결용)
+  const docCharsRef = useRef<CharNode[]>([]); // chars 배열 참조
 
   // ============================================
   // LSEQ 유틸리티 함수
@@ -732,6 +734,8 @@ export default function Home() {
                 setIsDocLoading(false);
                 // LSEQ chars 배열 설정
                 if (data.chars && Array.isArray(data.chars)) {
+                  // ref와 state 모두 업데이트
+                  docCharsRef.current = data.chars;
                   setDocChars(data.chars);
                   // content는 chars에서 생성
                   const content = data.chars
@@ -740,7 +744,8 @@ export default function Home() {
                   setDocContent(content);
                 } else if (data.content !== undefined) {
                   setDocContent(data.content);
-                  setDocChars([]); // 레거시 호환
+                  docCharsRef.current = []; // 레거시 호환
+                  setDocChars([]);
                 }
                 if (data.snapshotVersion) {
                   setLocalVersion(data.snapshotVersion);
@@ -752,16 +757,19 @@ export default function Home() {
                   setDocStatus(data.status);
                 }
                 // 현재 문서 정보 업데이트
-                setCurrentDoc((prev) =>
-                  prev
+                setCurrentDoc((prev) => {
+                  const updated = prev
                     ? {
                         ...prev,
                         snapshotVersion:
                           data.snapshotVersion || prev.snapshotVersion,
                         status: data.status ?? prev.status,
                       }
-                    : null,
-                );
+                    : null;
+                  // ref도 업데이트
+                  currentDocRef.current = updated;
+                  return updated;
+                });
                 break;
 
               case "docLeft":
@@ -771,45 +779,50 @@ export default function Home() {
               // === LSEQ 문서 편집 이벤트 (서버 브로드캐스트) ===
               case "docOp":
                 // 서버에서 브로드캐스트된 LSEQ 연산 적용
-                if (data.docId === currentDoc?.docId) {
+                // currentDocRef를 사용하여 클로저 문제 해결
+                if (data.docId === currentDocRef.current?.docId) {
                   if (data.op === "insert") {
                     // 삽입 연산 적용
-                    setDocChars((prev) => {
-                      const newChars = [...prev];
-                      // 이진 탐색으로 삽입 위치 찾기
-                      let lo = 0;
-                      let hi = newChars.length;
-                      while (lo < hi) {
-                        const mid = (lo + hi) >> 1;
-                        if (newChars[mid].id < data.id) {
-                          lo = mid + 1;
-                        } else {
-                          hi = mid;
-                        }
+                    const currentChars = [...docCharsRef.current];
+                    // 이진 탐색으로 삽입 위치 찾기
+                    let lo = 0;
+                    let hi = currentChars.length;
+                    while (lo < hi) {
+                      const mid = (lo + hi) >> 1;
+                      if (currentChars[mid].id < data.id) {
+                        lo = mid + 1;
+                      } else {
+                        hi = mid;
                       }
-                      newChars.splice(lo, 0, { id: data.id, char: data.char });
-                      // content 업데이트
-                      const newContent = newChars.map((c) => c.char).join("");
-                      setDocContent(newContent);
-                      return newChars;
+                    }
+                    currentChars.splice(lo, 0, {
+                      id: data.id,
+                      char: data.char,
                     });
+                    // ref와 state 모두 업데이트
+                    docCharsRef.current = currentChars;
+                    setDocChars(currentChars);
+                    // content 업데이트
+                    const newContent = currentChars.map((c) => c.char).join("");
+                    setDocContent(newContent);
                     addChannelLog(
                       `✏️ 삽입: "${data.char}" (by ${data.editedBy?.slice(0, 8) || "unknown"})`,
                     );
                   } else if (data.op === "delete") {
                     // 삭제 연산 적용
-                    setDocChars((prev) => {
-                      const idx = prev.findIndex((c) => c.id === data.id);
-                      if (idx !== -1) {
-                        const newChars = [...prev];
-                        newChars.splice(idx, 1);
-                        // content 업데이트
-                        const newContent = newChars.map((c) => c.char).join("");
-                        setDocContent(newContent);
-                        return newChars;
-                      }
-                      return prev;
-                    });
+                    const currentChars = [...docCharsRef.current];
+                    const idx = currentChars.findIndex((c) => c.id === data.id);
+                    if (idx !== -1) {
+                      currentChars.splice(idx, 1);
+                      // ref와 state 모두 업데이트
+                      docCharsRef.current = currentChars;
+                      setDocChars(currentChars);
+                      // content 업데이트
+                      const newContent = currentChars
+                        .map((c) => c.char)
+                        .join("");
+                      setDocContent(newContent);
+                    }
                     addChannelLog(
                       `🗑️ 삭제: ID ${data.id} (by ${data.editedBy?.slice(0, 8) || "unknown"})`,
                     );
@@ -1175,8 +1188,10 @@ export default function Home() {
     setDropTarget(null);
     // 문서 관련 상태 초기화
     setCurrentDoc(null);
+    currentDocRef.current = null; // ref 동기화
     setDocContent("");
     setDocChars([]); // LSEQ chars 초기화
+    docCharsRef.current = []; // ref 동기화
     setDocStatus(DOC_STATUS.NORMAL);
     setDocViewers([]);
     setLocalVersion("1.0.0");
@@ -1534,8 +1549,10 @@ export default function Home() {
 
     setIsDocLoading(true);
     setCurrentDoc(doc);
+    currentDocRef.current = doc; // ref 동기화
     setDocContent("");
     setDocChars([]); // LSEQ chars 초기화
+    docCharsRef.current = []; // ref 동기화
     setDocStatus(DOC_STATUS.NORMAL);
     setLocalVersion(doc.snapshotVersion || "1.0.0");
     setCursorPosition(0);
@@ -1575,8 +1592,10 @@ export default function Home() {
     }
 
     setCurrentDoc(null);
+    currentDocRef.current = null; // ref 동기화
     setDocContent("");
     setDocChars([]); // LSEQ chars 초기화
+    docCharsRef.current = []; // ref 동기화
     setDocStatus(DOC_STATUS.NORMAL);
     setDocViewers([]);
     setLocalVersion("1.0.0");
@@ -1589,7 +1608,7 @@ export default function Home() {
   // 문자 삽입 요청 (LSEQ 방식)
   const insertChar = useCallback(
     (cursorIndex: number, char: string) => {
-      if (!currentDoc || docStatus === DOC_STATUS.LOCKED) {
+      if (!currentDocRef.current || docStatus === DOC_STATUS.LOCKED) {
         if (docStatus === DOC_STATUS.LOCKED) {
           showToast(
             "⚠️ 문서가 잠금 상태입니다. 잠시 후 다시 시도해주세요.",
@@ -1599,17 +1618,19 @@ export default function Home() {
         return;
       }
 
+      // docCharsRef를 사용하여 최신 데이터 참조
+      const chars = docCharsRef.current;
       // 커서 위치 기준으로 leftId, rightId 결정
-      const leftId = cursorIndex > 0 ? docChars[cursorIndex - 1]?.id : null;
+      const leftId = cursorIndex > 0 ? chars[cursorIndex - 1]?.id : null;
       const rightId =
-        cursorIndex < docChars.length ? docChars[cursorIndex]?.id : null;
+        cursorIndex < chars.length ? chars[cursorIndex]?.id : null;
 
       if (wsRef.current?.readyState === WebSocket.OPEN) {
         wsRef.current.send(
           JSON.stringify({
             event: "editDoc",
             data: {
-              docId: currentDoc.docId,
+              docId: currentDocRef.current.docId,
               intent: "insert",
               leftId: leftId,
               rightId: rightId,
@@ -1619,13 +1640,13 @@ export default function Home() {
         );
       }
     },
-    [currentDoc, docChars, docStatus, showToast],
+    [docStatus, showToast],
   );
 
   // 문자 삭제 요청 (LSEQ 방식)
   const deleteChar = useCallback(
     (cursorIndex: number) => {
-      if (!currentDoc || docStatus === DOC_STATUS.LOCKED) {
+      if (!currentDocRef.current || docStatus === DOC_STATUS.LOCKED) {
         if (docStatus === DOC_STATUS.LOCKED) {
           showToast(
             "⚠️ 문서가 잠금 상태입니다. 잠시 후 다시 시도해주세요.",
@@ -1635,9 +1656,11 @@ export default function Home() {
         return;
       }
 
-      if (cursorIndex < 0 || cursorIndex >= docChars.length) return;
+      // docCharsRef를 사용하여 최신 데이터 참조
+      const chars = docCharsRef.current;
+      if (cursorIndex < 0 || cursorIndex >= chars.length) return;
 
-      const charId = docChars[cursorIndex]?.id;
+      const charId = chars[cursorIndex]?.id;
       if (!charId) return;
 
       if (wsRef.current?.readyState === WebSocket.OPEN) {
@@ -1645,7 +1668,7 @@ export default function Home() {
           JSON.stringify({
             event: "editDoc",
             data: {
-              docId: currentDoc.docId,
+              docId: currentDocRef.current.docId,
               intent: "delete",
               id: charId,
             },
@@ -1653,7 +1676,7 @@ export default function Home() {
         );
       }
     },
-    [currentDoc, docChars, docStatus, showToast],
+    [docStatus, showToast],
   );
 
   // 문서 동기화 요청 (오너만)
