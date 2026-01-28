@@ -11,7 +11,8 @@ const WS_MAX_RECONNECT_ATTEMPTS = 5;
 const WS_HEALTHCHECK_INTERVAL = 15 * 60 * 1000; // 15분 (900초)
 
 interface User {
-  userid: string;
+  id: string; // 내부 UUID (editedBy와 비교용)
+  userid: string; // Google ID
   email: string;
 }
 
@@ -797,7 +798,8 @@ export default function Home() {
                 // currentDocRef를 사용하여 클로저 문제 해결
                 if (data.docId === currentDocRef.current?.docId) {
                   // 자신의 편집인지 확인 (자신의 편집이면 커서 조정 안함)
-                  const isMyEdit = data.editedBy === user?.userid;
+                  // 서버의 editedBy는 내부 UUID(user.id)를 사용
+                  const isMyEdit = data.editedBy === user?.id;
                   // 다른 사람의 편집인 경우에만 커서 위치 저장
                   const savedCursorPos = !isMyEdit
                     ? textareaRef.current?.selectionStart || 0
@@ -908,7 +910,8 @@ export default function Home() {
                   data.operations
                 ) {
                   // 자신의 편집인지 확인 (자신의 편집이면 커서 조정 안함)
-                  const isMyEdit = data.editedBy === user?.userid;
+                  // 서버의 editedBy는 내부 UUID(user.id)를 사용
+                  const isMyEdit = data.editedBy === user?.id;
                   // 다른 사람의 편집인 경우에만 커서 위치 저장
                   const savedCursorPos = !isMyEdit
                     ? textareaRef.current?.selectionStart || 0
