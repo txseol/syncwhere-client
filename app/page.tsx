@@ -40,17 +40,10 @@ interface Document {
 
 // 문서 상태 상수
 const DOC_STATUS = {
-  NORMAL: 0, // 정상 (편집 가능)
+  NORMAL: 0, // 정상
   DELETED: 1, // 삭제됨
-  LOCKED: 2, // 잠금 (동기화/스냅샷 작업 중)
+  LOCKED: 2, // 잠금
 } as const;
-
-// LSEQ 문자 노드 인터페이스
-interface CharNode {
-  id: string; // LSEQ ID (청크 ID) - 같은 청크의 문자들은 동일한 ID를 가짐
-  offset: number; // 청크 내 오프셋 (0부터 시작)
-  char: string; // 문자 (단일 문자)
-}
 
 // 온라인 유저 인터페이스
 interface OnlineUser {
@@ -92,15 +85,13 @@ export default function Home() {
   const [channelLogs, setChannelLogs] = useState<string[]>([]);
   const [showChannelLogs, setShowChannelLogs] = useState(true);
 
-  // 문서 편집 상태 (LSEQ 기반)
+  // 문서 열람 상태
   const [currentDoc, setCurrentDoc] = useState<Document | null>(null);
   const [docContent, setDocContent] = useState<string>("");
-  const [docChars, setDocChars] = useState<CharNode[]>([]); // LSEQ chars 배열
   const [docStatus, setDocStatus] = useState<number>(DOC_STATUS.NORMAL);
   const [docViewers, setDocViewers] = useState<OnlineUser[]>([]);
   const [isDocLoading, setIsDocLoading] = useState(false);
   const [localVersion, setLocalVersion] = useState<string>("1.0.0");
-  const [cursorPosition, setCursorPosition] = useState<number>(0); // 커서 위치
 
   // 드래그앤드랍 상태
   const [dragItem, setDragItem] = useState<{
@@ -142,55 +133,7 @@ export default function Home() {
   const healthCheckIntervalRef = useRef<NodeJS.Timeout | null>(null);
   const toastTimeoutRef = useRef<NodeJS.Timeout | null>(null);
   const mountedRef = useRef(true);
-  const textareaRef = useRef<HTMLTextAreaElement | null>(null);
   const currentDocRef = useRef<Document | null>(null); // 현재 문서 참조 (클로저 문제 해결용)
-  const docCharsRef = useRef<CharNode[]>([]); // chars 배열 참조
-
-  // IME 처리 및 디바운싱을 위한 ref
-  const debounceTimerRef = useRef<NodeJS.Timeout | null>(null);
-  const lastConfirmedContentRef = useRef<string>(""); // 마지막 확정 전송된 콘텐츠
-  const lastConfirmedCharsRef = useRef<CharNode[]>([]); // 마지막 확정 전송된 chars 배열
-  const lastCursorPosRef = useRef<number>(0); // 마지막 커서 위치
-  const isComposingRef = useRef<boolean>(false); // IME 조합 중 여부
-  const pendingChangesRef = useRef<{
-    content: string;
-    cursorPos: number;
-  } | null>(null); // 대기 중인 변경사항
-
-  // ============================================
-  // LSEQ 유틸리티 함수
-  // ============================================
-
-  // LSEQ ID 비교 (문자열 비교로 충분 - 고정 자릿수 패딩)
-  const compareLseqId = useCallback((a: string, b: string): number => {
-    // 문자열 사전식 비교 (패딩된 숫자이므로 정상 작동)
-    if (a < b) return -1;
-    if (a > b) return 1;
-    return 0;
-  }, []);
-
-  // chars 배열에서 삽입 위치 찾기 (이진 탐색)
-  const findInsertIndex = useCallback(
-    (chars: CharNode[], id: string): number => {
-      let lo = 0;
-      let hi = chars.length;
-      while (lo < hi) {
-        const mid = (lo + hi) >> 1;
-        if (compareLseqId(chars[mid].id, id) < 0) {
-          lo = mid + 1;
-        } else {
-          hi = mid;
-        }
-      }
-      return lo;
-    },
-    [compareLseqId],
-  );
-
-  // chars 배열 → content 문자열 변환
-  const charsToContent = useCallback((chars: CharNode[]): string => {
-    return chars.map((c) => c.char).join("");
-  }, []);
 
   // 로그 추가 함수
   const addLog = useCallback((message: string) => {
@@ -745,27 +688,18 @@ export default function Home() {
               case "docEntered":
                 addChannelLog(`📄 문서 '${data.docName}' 열람 시작`);
                 setIsDocLoading(false);
-                // LSEQ chars 배열 설정
-                if (data.chars && Array.isArray(data.chars)) {
-                  // ref와 state 모두 업데이트
-                  docCharsRef.current = data.chars;
-                  setDocChars(data.chars);
-                  // content는 chars에서 생성
+                // 콘텐츠 설정 (읽기 전용)
+                if (data.content !== undefined) {
+                  setDocContent(data.content);
+                } else if (data.chars && Array.isArray(data.chars)) {
+                  // chars 배열이 있으면 문자열로 변환
+                  interface CharData {
+                    char: string;
+                  }
                   const content = data.chars
-                    .map((c: CharNode) => c.char)
+                    .map((c: CharData) => c.char)
                     .join("");
                   setDocContent(content);
-                  // 확정 콘텐츠 초기화
-                  lastConfirmedContentRef.current = content;
-                  lastConfirmedCharsRef.current = [...data.chars];
-                  lastCursorPosRef.current = 0;
-                } else if (data.content !== undefined) {
-                  setDocContent(data.content);
-                  docCharsRef.current = []; // 레거시 호환
-                  setDocChars([]);
-                  lastConfirmedContentRef.current = data.content;
-                  lastConfirmedCharsRef.current = [];
-                  lastCursorPosRef.current = 0;
                 }
                 if (data.snapshotVersion) {
                   setLocalVersion(data.snapshotVersion);
@@ -794,554 +728,6 @@ export default function Home() {
 
               case "docLeft":
                 addChannelLog(`📄 문서 열람 종료`);
-                break;
-
-              // === LSEQ 문서 편집 이벤트 (서버 브로드캐스트) ===
-              case "docOp":
-                // 서버에서 브로드캐스트된 LSEQ 연산 적용
-                // currentDocRef를 사용하여 클로저 문제 해결
-                if (data.docId === currentDocRef.current?.docId) {
-                  // 자신의 편집인지 확인 (자신의 편집이면 커서 조정 안함)
-                  // 서버의 editedBy는 내부 UUID(user.id)를 사용
-                  const isMyEdit = data.editedBy === user?.id;
-                  // 다른 사람의 편집인 경우에만 커서 위치 저장
-                  const savedCursorPos = !isMyEdit
-                    ? textareaRef.current?.selectionStart || 0
-                    : 0;
-
-                  if (data.op === "insert") {
-                    // 삽입 연산 적용 (단일 문자 또는 청크)
-                    // 청크: data.text, 단일: data.char
-                    const insertChars = data.text || data.char || "";
-                    const currentChars = [...docCharsRef.current];
-
-                    let insertPos: number;
-
-                    // leftId === rightId인 경우: 청크 내부 삽입 (offset 기반)
-                    if (
-                      data.leftId &&
-                      data.rightId &&
-                      data.leftId === data.rightId
-                    ) {
-                      const chunkStartIdx = currentChars.findIndex(
-                        (c) => c.id === data.leftId,
-                      );
-                      if (chunkStartIdx !== -1) {
-                        const offset =
-                          typeof data.offset === "number" ? data.offset : 0;
-                        insertPos = chunkStartIdx + offset;
-                      } else {
-                        // 청크를 찾지 못하면 ID 기반 이진탐색
-                        let lo = 0;
-                        let hi = currentChars.length;
-                        while (lo < hi) {
-                          const mid = (lo + hi) >> 1;
-                          if (currentChars[mid].id < data.id) {
-                            lo = mid + 1;
-                          } else {
-                            hi = mid;
-                          }
-                        }
-                        insertPos = lo;
-                      }
-                    } else {
-                      // 일반 삽입: ID 기반 이진 탐색
-                      let lo = 0;
-                      let hi = currentChars.length;
-                      while (lo < hi) {
-                        const mid = (lo + hi) >> 1;
-                        if (currentChars[mid].id < data.id) {
-                          lo = mid + 1;
-                        } else {
-                          hi = mid;
-                        }
-                      }
-                      insertPos = lo;
-                    }
-
-                    // 청크의 각 문자를 개별 CharNode로 삽입 (동일 청크 ID, 다른 offset)
-                    const newNodes: CharNode[] = [];
-                    for (let i = 0; i < insertChars.length; i++) {
-                      newNodes.push({
-                        id: data.id,
-                        offset: i,
-                        char: insertChars[i],
-                      });
-                    }
-                    currentChars.splice(insertPos, 0, ...newNodes);
-
-                    // ref와 state 모두 업데이트
-                    docCharsRef.current = currentChars;
-                    setDocChars(currentChars);
-                    // content 업데이트
-                    const newContent = currentChars.map((c) => c.char).join("");
-                    // 확정 콘텐츠 업데이트 (서버 응답 기준)
-                    lastConfirmedContentRef.current = newContent;
-                    lastConfirmedCharsRef.current = [...currentChars];
-
-                    // 자신의 편집이면 docContent는 이미 로컬에서 업데이트됨 (setDocContent 호출 안함)
-                    // 다른 사람의 편집인 경우에만 docContent 업데이트 및 커서 위치 조정
-                    if (!isMyEdit) {
-                      setDocContent(newContent);
-                      requestAnimationFrame(() => {
-                        if (textareaRef.current) {
-                          // 삽입 위치가 커서 앞이면 커서도 이동
-                          const newCursorPos =
-                            insertPos <= savedCursorPos
-                              ? savedCursorPos + insertChars.length
-                              : savedCursorPos;
-                          textareaRef.current.setSelectionRange(
-                            newCursorPos,
-                            newCursorPos,
-                          );
-                          lastCursorPosRef.current = newCursorPos;
-                        }
-                      });
-                    }
-
-                    addChannelLog(
-                      `✏️ 삽입: "${insertChars.length > 10 ? insertChars.slice(0, 10) + "..." : insertChars}" (by ${data.editedBy?.slice(0, 8) || "unknown"})`,
-                    );
-                  } else if (data.op === "delete") {
-                    // 삭제 연산 적용
-                    const currentChars = [...docCharsRef.current];
-
-                    // offset이 있으면 해당 위치의 문자만 삭제, 없으면 청크 전체 삭제
-                    const deleteIndices: number[] = [];
-                    if (typeof data.offset === "number") {
-                      // 특정 offset의 문자만 삭제
-                      for (let i = 0; i < currentChars.length; i++) {
-                        if (
-                          currentChars[i].id === data.id &&
-                          currentChars[i].offset === data.offset
-                        ) {
-                          deleteIndices.push(i);
-                          break;
-                        }
-                      }
-                    } else {
-                      // 청크 ID가 일치하는 모든 문자 삭제 (청크 전체 삭제)
-                      for (let i = 0; i < currentChars.length; i++) {
-                        if (currentChars[i].id === data.id) {
-                          deleteIndices.push(i);
-                        }
-                      }
-                    }
-
-                    if (deleteIndices.length > 0) {
-                      const deletePos = deleteIndices[0];
-                      const deleteCount = deleteIndices.length;
-                      // 뒤에서부터 삭제
-                      for (let i = deleteIndices.length - 1; i >= 0; i--) {
-                        currentChars.splice(deleteIndices[i], 1);
-                      }
-                      // ref와 state 모두 업데이트
-                      docCharsRef.current = currentChars;
-                      setDocChars(currentChars);
-                      // content 업데이트
-                      const newContent = currentChars
-                        .map((c) => c.char)
-                        .join("");
-                      // 확정 콘텐츠 업데이트 (서버 응답 기준)
-                      lastConfirmedContentRef.current = newContent;
-                      lastConfirmedCharsRef.current = [...currentChars];
-
-                      // 자신의 편집이면 docContent는 이미 로컬에서 업데이트됨 (setDocContent 호출 안함)
-                      // 다른 사람의 편집인 경우에만 docContent 업데이트 및 커서 위치 조정
-                      if (!isMyEdit) {
-                        setDocContent(newContent);
-                        requestAnimationFrame(() => {
-                          if (textareaRef.current) {
-                            // 삭제 위치가 커서 앞이면 커서도 조정
-                            const newCursorPos =
-                              deletePos < savedCursorPos
-                                ? Math.max(0, savedCursorPos - deleteCount)
-                                : savedCursorPos;
-                            textareaRef.current.setSelectionRange(
-                              newCursorPos,
-                              newCursorPos,
-                            );
-                            lastCursorPosRef.current = newCursorPos;
-                          }
-                        });
-                      }
-                    }
-                    addChannelLog(
-                      `🗑️ 삭제: ID ${data.id}${typeof data.offset === "number" ? `:${data.offset}` : ""} (by ${data.editedBy?.slice(0, 8) || "unknown"})`,
-                    );
-                  } else if (data.op === "split") {
-                    // split 연산: 청크 분할 후 새 문자 삽입
-                    // splitResult: [{id, text}, {id, text}] 형태
-                    const currentChars = [...docCharsRef.current];
-                    const targetId = data.targetId;
-
-                    // 기존 청크 찾기
-                    const targetIdx = currentChars.findIndex(
-                      (c) => c.id === targetId,
-                    );
-
-                    if (targetIdx !== -1) {
-                      // 기존 청크의 전체 범위 찾기
-                      let chunkEndIdx = targetIdx;
-                      while (
-                        chunkEndIdx + 1 < currentChars.length &&
-                        currentChars[chunkEndIdx + 1].id === targetId
-                      ) {
-                        chunkEndIdx++;
-                      }
-                      const chunkLength = chunkEndIdx - targetIdx + 1;
-
-                      // 기존 청크 삭제
-                      currentChars.splice(targetIdx, chunkLength);
-
-                      // splitResult로 새 청크들 삽입
-                      const newNodes: CharNode[] = [];
-                      if (data.splitResult && Array.isArray(data.splitResult)) {
-                        for (const chunk of data.splitResult) {
-                          const text = chunk.text || "";
-                          for (let i = 0; i < text.length; i++) {
-                            newNodes.push({
-                              id: chunk.id,
-                              offset: i,
-                              char: text[i],
-                            });
-                          }
-                        }
-                      }
-                      currentChars.splice(targetIdx, 0, ...newNodes);
-
-                      // 커서 조정 (다른 사람 편집인 경우)
-                      const insertedLen =
-                        newNodes.length > chunkLength
-                          ? newNodes.length - chunkLength
-                          : 0;
-
-                      docCharsRef.current = currentChars;
-                      setDocChars(currentChars);
-                      const newContent = currentChars
-                        .map((c) => c.char)
-                        .join("");
-                      lastConfirmedContentRef.current = newContent;
-                      lastConfirmedCharsRef.current = [...currentChars];
-
-                      if (!isMyEdit) {
-                        setDocContent(newContent);
-                        requestAnimationFrame(() => {
-                          if (textareaRef.current) {
-                            const newCursorPos =
-                              targetIdx <= savedCursorPos
-                                ? savedCursorPos + insertedLen
-                                : savedCursorPos;
-                            textareaRef.current.setSelectionRange(
-                              newCursorPos,
-                              newCursorPos,
-                            );
-                            lastCursorPosRef.current = newCursorPos;
-                          }
-                        });
-                      }
-                    }
-                    addChannelLog(
-                      `✂️ 분할: ${data.targetId} → ${data.splitResult?.length || 0}개 (by ${data.editedBy?.slice(0, 8) || "unknown"})`,
-                    );
-                  }
-                  // 버전 업데이트
-                  if (data.logVersion) {
-                    setLocalVersion(data.logVersion);
-                  }
-                }
-                break;
-
-              // === LSEQ Batch 편집 이벤트 (여러 문자/청크 동시 처리) ===
-              case "docOpBatch":
-                if (
-                  data.docId === currentDocRef.current?.docId &&
-                  data.operations
-                ) {
-                  // 자신의 편집인지 확인 (자신의 편집이면 커서 조정 안함)
-                  // 서버의 editedBy는 내부 UUID(user.id)를 사용
-                  const isMyEdit = data.editedBy === user?.id;
-                  // 다른 사람의 편집인 경우에만 커서 위치 저장
-                  const savedCursorPos = !isMyEdit
-                    ? textareaRef.current?.selectionStart || 0
-                    : 0;
-                  let cursorAdjustment = 0;
-
-                  const currentChars = [...docCharsRef.current];
-
-                  for (const op of data.operations) {
-                    // === 청크 분할(split) 연산 처리 ===
-                    if (op.op === "split") {
-                      // splitResult: [{id, text}, ...] 배열 형태
-                      const {
-                        targetId,
-                        offset,
-                        insertId,
-                        insertText,
-                        splitResult,
-                      } = op;
-
-                      // 1. 기존 청크(targetId) 찾기
-                      const targetIdx = currentChars.findIndex(
-                        (c) => c.id === targetId,
-                      );
-
-                      if (targetIdx !== -1) {
-                        // 기존 청크의 전체 범위 찾기
-                        const chunkStartIdx = targetIdx;
-                        let chunkEndIdx = targetIdx;
-                        while (
-                          chunkEndIdx + 1 < currentChars.length &&
-                          currentChars[chunkEndIdx + 1].id === targetId
-                        ) {
-                          chunkEndIdx++;
-                        }
-                        const chunkLength = chunkEndIdx - chunkStartIdx + 1;
-
-                        // 다른 사람의 편집인 경우 커서 조정 계산
-                        if (!isMyEdit && insertText) {
-                          const insertGlobalPos = chunkStartIdx + (offset || 0);
-                          if (
-                            insertGlobalPos <=
-                            savedCursorPos + cursorAdjustment
-                          ) {
-                            cursorAdjustment += insertText.length;
-                          }
-                        }
-
-                        // 2. 기존 청크 삭제
-                        currentChars.splice(chunkStartIdx, chunkLength);
-
-                        // 3. splitResult 배열로 새 청크들 삽입
-                        const newNodes: CharNode[] = [];
-                        if (Array.isArray(splitResult)) {
-                          for (const chunk of splitResult) {
-                            const text = chunk.text || "";
-                            for (let i = 0; i < text.length; i++) {
-                              newNodes.push({
-                                id: chunk.id,
-                                offset: i,
-                                char: text[i],
-                              });
-                            }
-                          }
-                        }
-
-                        currentChars.splice(chunkStartIdx, 0, ...newNodes);
-                      }
-                    }
-                    // === 청크 삽입 (insertText) 또는 단일 삽입 (insert) ===
-                    else if (op.op === "insertText" || op.op === "insert") {
-                      // 청크: op.text, 단일: op.char
-                      const insertChars = op.text || op.char || "";
-                      if (insertChars.length === 0) continue;
-
-                      let insertPos: number;
-
-                      // leftId === rightId인 경우: 청크 내부 삽입 (offset 기반)
-                      if (op.leftId && op.rightId && op.leftId === op.rightId) {
-                        // 해당 청크의 시작 위치 찾기
-                        const chunkStartIdx = currentChars.findIndex(
-                          (c) => c.id === op.leftId,
-                        );
-                        if (chunkStartIdx !== -1) {
-                          // 청크 시작 + offset 위치에 삽입
-                          // op.offset이 없으면 청크 끝에 삽입
-                          const offset =
-                            typeof op.offset === "number" ? op.offset : 0;
-                          insertPos = chunkStartIdx + offset;
-                        } else {
-                          // 청크를 찾지 못하면 ID 기반 이진탐색
-                          let lo = 0;
-                          let hi = currentChars.length;
-                          while (lo < hi) {
-                            const mid = (lo + hi) >> 1;
-                            if (currentChars[mid].id < op.id) {
-                              lo = mid + 1;
-                            } else {
-                              hi = mid;
-                            }
-                          }
-                          insertPos = lo;
-                        }
-                      } else {
-                        // 일반 삽입: ID 기반 이진 탐색
-                        let lo = 0;
-                        let hi = currentChars.length;
-                        while (lo < hi) {
-                          const mid = (lo + hi) >> 1;
-                          if (currentChars[mid].id < op.id) {
-                            lo = mid + 1;
-                          } else {
-                            hi = mid;
-                          }
-                        }
-                        insertPos = lo;
-                      }
-
-                      // 다른 사람의 편집인 경우에만 커서 조정 계산
-                      if (
-                        !isMyEdit &&
-                        insertPos <= savedCursorPos + cursorAdjustment
-                      ) {
-                        cursorAdjustment += insertChars.length;
-                      }
-
-                      // 청크의 각 문자를 개별 CharNode로 삽입 (동일 청크 ID, 다른 offset)
-                      const newNodes: CharNode[] = [];
-                      for (let i = 0; i < insertChars.length; i++) {
-                        newNodes.push({
-                          id: op.id,
-                          offset: i,
-                          char: insertChars[i],
-                        });
-                      }
-                      currentChars.splice(insertPos, 0, ...newNodes);
-                    } else if (op.op === "delete") {
-                      // === 삭제 연산 (offset 있으면 단일 문자, 없으면 청크 전체) ===
-                      const deleteIndices: number[] = [];
-                      if (typeof op.offset === "number") {
-                        // 특정 offset의 문자만 삭제
-                        for (let i = 0; i < currentChars.length; i++) {
-                          if (
-                            currentChars[i].id === op.id &&
-                            currentChars[i].offset === op.offset
-                          ) {
-                            deleteIndices.push(i);
-                            break;
-                          }
-                        }
-                      } else {
-                        // 청크 ID가 일치하는 모든 문자 삭제
-                        for (let i = 0; i < currentChars.length; i++) {
-                          if (currentChars[i].id === op.id) {
-                            deleteIndices.push(i);
-                          }
-                        }
-                      }
-
-                      if (deleteIndices.length > 0) {
-                        const deletePos = deleteIndices[0];
-
-                        // 다른 사람의 편집인 경우에만 커서 조정 계산
-                        if (
-                          !isMyEdit &&
-                          deletePos < savedCursorPos + cursorAdjustment
-                        ) {
-                          // 커서 앞에서 삭제된 문자 수만큼 조정
-                          const adjustedCursorPos =
-                            savedCursorPos + cursorAdjustment;
-                          const deletedBeforeCursor = deleteIndices.filter(
-                            (idx) => idx < adjustedCursorPos,
-                          ).length;
-                          cursorAdjustment -= deletedBeforeCursor;
-                        }
-
-                        // 뒤에서부터 삭제
-                        for (let i = deleteIndices.length - 1; i >= 0; i--) {
-                          currentChars.splice(deleteIndices[i], 1);
-                        }
-                      }
-                    } else if (op.op === "trim" || op.op === "update") {
-                      // === 부분 삭제 (청크 텍스트 수정) ===
-                      // 청크 ID가 일치하는 모든 문자 찾기
-                      const chunkIndices: number[] = [];
-                      for (let i = 0; i < currentChars.length; i++) {
-                        if (currentChars[i].id === op.id) {
-                          chunkIndices.push(i);
-                        }
-                      }
-
-                      if (chunkIndices.length > 0 && op.text !== undefined) {
-                        const chunkStartIdx = chunkIndices[0];
-
-                        // 다른 사람의 편집인 경우 커서 조정
-                        if (!isMyEdit) {
-                          const oldLen = chunkIndices.length;
-                          const newLen = op.text.length;
-                          if (
-                            chunkStartIdx <
-                            savedCursorPos + cursorAdjustment
-                          ) {
-                            cursorAdjustment += newLen - oldLen;
-                          }
-                        }
-
-                        // 기존 청크 삭제
-                        for (let i = chunkIndices.length - 1; i >= 0; i--) {
-                          currentChars.splice(chunkIndices[i], 1);
-                        }
-
-                        // 새 텍스트로 교체
-                        if (op.text.length > 0) {
-                          const newNodes: CharNode[] = [];
-                          for (let i = 0; i < op.text.length; i++) {
-                            newNodes.push({
-                              id: op.id,
-                              offset: i,
-                              char: op.text[i],
-                            });
-                          }
-                          currentChars.splice(chunkStartIdx, 0, ...newNodes);
-                        }
-                      }
-                    }
-                  }
-
-                  // ref와 state 모두 업데이트
-                  docCharsRef.current = currentChars;
-                  setDocChars(currentChars);
-                  // content 업데이트
-                  const newContent = currentChars.map((c) => c.char).join("");
-                  // 확정 콘텐츠도 업데이트 (서버 응답 기준)
-                  lastConfirmedContentRef.current = newContent;
-                  lastConfirmedCharsRef.current = [...currentChars];
-
-                  // 자신의 편집이면 docContent는 이미 로컬에서 업데이트됨 (setDocContent 호출 안함)
-                  // 다른 사람의 편집인 경우에만 docContent 업데이트 및 커서 위치 복원
-                  if (!isMyEdit) {
-                    setDocContent(newContent);
-                    requestAnimationFrame(() => {
-                      if (textareaRef.current) {
-                        const newCursorPos = Math.max(
-                          0,
-                          Math.min(
-                            savedCursorPos + cursorAdjustment,
-                            newContent.length,
-                          ),
-                        );
-                        textareaRef.current.setSelectionRange(
-                          newCursorPos,
-                          newCursorPos,
-                        );
-                        lastCursorPosRef.current = newCursorPos;
-                      }
-                    });
-                  }
-
-                  addChannelLog(
-                    `✏️ Batch: ${data.operations.length}개 연산 (by ${data.editedBy?.slice(0, 8) || "unknown"})`,
-                  );
-
-                  // 버전 업데이트
-                  if (data.logVersion) {
-                    setLocalVersion(data.logVersion);
-                  }
-                }
-                break;
-
-              // === 브로드캐스트 이벤트: 문서 편집 (레거시 - 호환용) ===
-              case "docEdited":
-                // 이전 방식 (position 기반) - 레거시 호환
-                if (data.docId === currentDoc?.docId && data.operation) {
-                  addChannelLog(
-                    `✏️ ${data.email || "다른 유저"}님이 문서를 편집했습니다.`,
-                  );
-                  // 버전 업데이트
-                  if (data.newVersion) {
-                    setLocalVersion(data.newVersion);
-                  }
-                }
                 break;
 
               // === 브로드캐스트 이벤트: 문서 상태 변경 ===
@@ -1403,14 +789,6 @@ export default function Home() {
                 if (data.docId === currentDoc?.docId) {
                   setDocStatus(data.status);
                   setLocalVersion(data.snapshotVersion);
-                }
-                break;
-
-              // === 문서 편집 성공 응답 ===
-              case "docEditSuccess":
-                // 내 편집이 성공적으로 적용됨
-                if (data.newVersion) {
-                  setLocalVersion(data.newVersion);
                 }
                 break;
 
@@ -1684,14 +1062,11 @@ export default function Home() {
     setDropTarget(null);
     // 문서 관련 상태 초기화
     setCurrentDoc(null);
-    currentDocRef.current = null; // ref 동기화
+    currentDocRef.current = null;
     setDocContent("");
-    setDocChars([]); // LSEQ chars 초기화
-    docCharsRef.current = []; // ref 동기화
     setDocStatus(DOC_STATUS.NORMAL);
     setDocViewers([]);
     setLocalVersion("1.0.0");
-    setCursorPosition(0);
   };
 
   // 폴더 토글
@@ -2039,29 +1414,16 @@ export default function Home() {
     addLog(`폴더 삭제 요청: ${folderPath} (${docsToDelete.length}개 문서)`);
   };
 
-  // 문서 열람 시작
+  // 문서 열람 시작 (읽기 전용)
   const openDocument = (doc: Document) => {
     if (!currentChannel) return;
 
     setIsDocLoading(true);
     setCurrentDoc(doc);
-    currentDocRef.current = doc; // ref 동기화
+    currentDocRef.current = doc;
     setDocContent("");
-    setDocChars([]); // LSEQ chars 초기화
-    docCharsRef.current = []; // ref 동기화
     setDocStatus(DOC_STATUS.NORMAL);
     setLocalVersion(doc.snapshotVersion || "1.0.0");
-    setCursorPosition(0);
-    // IME 관련 ref 초기화
-    lastConfirmedContentRef.current = "";
-    lastConfirmedCharsRef.current = [];
-    lastCursorPosRef.current = 0;
-    isComposingRef.current = false;
-    pendingChangesRef.current = null;
-    if (debounceTimerRef.current) {
-      clearTimeout(debounceTimerRef.current);
-      debounceTimerRef.current = null;
-    }
 
     if (wsRef.current?.readyState === WebSocket.OPEN) {
       wsRef.current.send(
@@ -2098,453 +1460,11 @@ export default function Home() {
     }
 
     setCurrentDoc(null);
-    currentDocRef.current = null; // ref 동기화
+    currentDocRef.current = null;
     setDocContent("");
-    setDocChars([]); // LSEQ chars 초기화
-    docCharsRef.current = []; // ref 동기화
     setDocStatus(DOC_STATUS.NORMAL);
     setDocViewers([]);
     setLocalVersion("1.0.0");
-    // IME 관련 ref 초기화
-    lastConfirmedContentRef.current = "";
-    lastConfirmedCharsRef.current = [];
-    lastCursorPosRef.current = 0;
-    isComposingRef.current = false;
-    pendingChangesRef.current = null;
-    if (debounceTimerRef.current) {
-      clearTimeout(debounceTimerRef.current);
-      debounceTimerRef.current = null;
-    }
-  };
-
-  // ============================================
-  // LSEQ 문서 편집 함수
-  // ============================================
-
-  // 문자 삽입 요청 (LSEQ 방식)
-  const insertChar = useCallback(
-    (cursorIndex: number, char: string) => {
-      if (!currentDocRef.current || docStatus === DOC_STATUS.LOCKED) {
-        if (docStatus === DOC_STATUS.LOCKED) {
-          showToast(
-            "⚠️ 문서가 잠금 상태입니다. 잠시 후 다시 시도해주세요.",
-            3000,
-          );
-        }
-        return;
-      }
-
-      // docCharsRef를 사용하여 최신 데이터 참조
-      const chars = docCharsRef.current;
-      // 커서 위치 기준으로 leftId, rightId 결정
-      const leftId = cursorIndex > 0 ? chars[cursorIndex - 1]?.id : null;
-      const rightId =
-        cursorIndex < chars.length ? chars[cursorIndex]?.id : null;
-
-      if (wsRef.current?.readyState === WebSocket.OPEN) {
-        wsRef.current.send(
-          JSON.stringify({
-            event: "editDoc",
-            data: {
-              docId: currentDocRef.current.docId,
-              intent: "insert",
-              leftId: leftId,
-              rightId: rightId,
-              value: char,
-            },
-          }),
-        );
-      }
-    },
-    [docStatus, showToast],
-  );
-
-  // 문자 삭제 요청 (LSEQ 방식)
-  const deleteChar = useCallback(
-    (cursorIndex: number) => {
-      if (!currentDocRef.current || docStatus === DOC_STATUS.LOCKED) {
-        if (docStatus === DOC_STATUS.LOCKED) {
-          showToast(
-            "⚠️ 문서가 잠금 상태입니다. 잠시 후 다시 시도해주세요.",
-            3000,
-          );
-        }
-        return;
-      }
-
-      // docCharsRef를 사용하여 최신 데이터 참조
-      const chars = docCharsRef.current;
-      if (cursorIndex < 0 || cursorIndex >= chars.length) return;
-
-      const charId = chars[cursorIndex]?.id;
-      if (!charId) return;
-
-      if (wsRef.current?.readyState === WebSocket.OPEN) {
-        wsRef.current.send(
-          JSON.stringify({
-            event: "editDoc",
-            data: {
-              docId: currentDocRef.current.docId,
-              intent: "delete",
-              id: charId,
-            },
-          }),
-        );
-      }
-    },
-    [docStatus, showToast],
-  );
-
-  // 문서 동기화 요청 (오너만)
-  const syncDocument = () => {
-    if (!currentDoc || !currentChannel) return;
-
-    // 권한 확인 (오너만)
-    if (currentChannel.myPermission !== 0) {
-      showToast("⚠️ 동기화 권한이 없습니다.", 3000);
-      return;
-    }
-
-    if (wsRef.current?.readyState === WebSocket.OPEN) {
-      wsRef.current.send(
-        JSON.stringify({
-          event: "syncDoc",
-          data: {
-            time: Date.now(),
-            channelId: currentChannel.channelId,
-            docId: currentDoc.docId,
-          },
-        }),
-      );
-      addLog(`문서 동기화 요청: ${currentDoc.name}`);
-      addChannelLog(`🔄 동기화 요청: ${currentDoc.name}`);
-    }
-  };
-
-  // 스냅샷 생성 요청 (오너만)
-  const createSnapshot = () => {
-    if (!currentDoc || !currentChannel) return;
-
-    // 권한 확인 (오너만)
-    if (currentChannel.myPermission !== 0) {
-      showToast("⚠️ 스냅샷 생성 권한이 없습니다.", 3000);
-      return;
-    }
-
-    if (wsRef.current?.readyState === WebSocket.OPEN) {
-      wsRef.current.send(
-        JSON.stringify({
-          event: "snapshotDoc",
-          data: {
-            time: Date.now(),
-            channelId: currentChannel.channelId,
-            docId: currentDoc.docId,
-          },
-        }),
-      );
-      addLog(`스냅샷 생성 요청: ${currentDoc.name}`);
-      addChannelLog(`📸 스냅샷 생성 요청: ${currentDoc.name}`);
-    }
-  };
-
-  // 문서 상태 조회
-  const getDocStatus = () => {
-    if (!currentDoc) return;
-
-    if (wsRef.current?.readyState === WebSocket.OPEN) {
-      wsRef.current.send(
-        JSON.stringify({
-          event: "getDocStatus",
-          data: {
-            time: Date.now(),
-            docId: currentDoc.docId,
-          },
-        }),
-      );
-    }
-  };
-
-  // ============================================
-  // IME 및 디바운싱 처리 함수
-  // ============================================
-
-  // 확정된 변경사항을 서버로 전송 (청크 기반 최적화)
-  const sendConfirmedChanges = useCallback(
-    (confirmedContent: string) => {
-      if (!currentDocRef.current || docStatus === DOC_STATUS.LOCKED) return;
-      if (wsRef.current?.readyState !== WebSocket.OPEN) return;
-
-      const lastContent = lastConfirmedContentRef.current;
-      if (confirmedContent === lastContent) return;
-
-      // 마지막 확정 시점의 chars 사용 (docCharsRef가 아님!)
-      const lastChars = lastConfirmedCharsRef.current;
-
-      // diff: 공통 prefix/suffix 찾기
-      let prefixLen = 0;
-      const minLen = Math.min(lastContent.length, confirmedContent.length);
-      while (
-        prefixLen < minLen &&
-        lastContent[prefixLen] === confirmedContent[prefixLen]
-      ) {
-        prefixLen++;
-      }
-
-      let suffixLen = 0;
-      while (
-        suffixLen < minLen - prefixLen &&
-        lastContent[lastContent.length - 1 - suffixLen] ===
-          confirmedContent[confirmedContent.length - 1 - suffixLen]
-      ) {
-        suffixLen++;
-      }
-
-      const deleteStart = prefixLen;
-      const deleteEnd = lastContent.length - suffixLen;
-      const insertStart = prefixLen;
-      const insertText = confirmedContent.slice(
-        insertStart,
-        confirmedContent.length - suffixLen,
-      );
-      const deleteCount = deleteEnd - deleteStart;
-
-      if (deleteCount === 0 && insertText.length === 0) return;
-
-      // 삭제할 문자 정보 수집 (lastConfirmedChars 기준)
-      const deleteInfos: { id: string; offset: number }[] = [];
-      for (let i = deleteStart; i < deleteEnd; i++) {
-        if (i < lastChars.length && lastChars[i]) {
-          deleteInfos.push({
-            id: lastChars[i].id,
-            offset: lastChars[i].offset,
-          });
-        }
-      }
-
-      // 삭제 후 chars 상태 (삽입 위치 계산용)
-      const adjustedChars = [...lastChars];
-      if (deleteCount > 0) {
-        adjustedChars.splice(deleteStart, deleteCount);
-      }
-
-      // 삽입 위치의 좌/우 문자 정보
-      const leftChar = insertStart > 0 ? adjustedChars[insertStart - 1] : null;
-      const rightChar =
-        insertStart < adjustedChars.length ? adjustedChars[insertStart] : null;
-
-      const leftId = leftChar?.id || null;
-      const rightId = rightChar?.id || null;
-      const leftOffset = leftChar?.offset ?? null;
-
-      // 데이터 전송
-      const docId = currentDocRef.current.docId;
-
-      if (deleteInfos.length > 0 && insertText.length === 0) {
-        // 삭제만
-        wsRef.current.send(
-          JSON.stringify({
-            event: deleteInfos.length === 1 ? "editDoc" : "editDocBatch",
-            data:
-              deleteInfos.length === 1
-                ? { docId, intent: "delete", ...deleteInfos[0] }
-                : {
-                    docId,
-                    operations: deleteInfos.map((d) => ({
-                      intent: "delete",
-                      ...d,
-                    })),
-                  },
-          }),
-        );
-      } else if (deleteInfos.length === 0 && insertText.length > 0) {
-        // 삽입만
-        wsRef.current.send(
-          JSON.stringify({
-            event: insertText.length === 1 ? "editDoc" : "editDocBatch",
-            data:
-              insertText.length === 1
-                ? {
-                    docId,
-                    intent: "insert",
-                    leftId,
-                    rightId,
-                    offset: leftOffset !== null ? leftOffset + 1 : 0,
-                    value: insertText,
-                  }
-                : {
-                    docId,
-                    text: insertText,
-                    leftId,
-                    rightId,
-                    offset: leftOffset !== null ? leftOffset + 1 : 0,
-                  },
-          }),
-        );
-      } else {
-        // 삭제 + 삽입
-        wsRef.current.send(
-          JSON.stringify({
-            event: "editDocBatch",
-            data: {
-              docId,
-              operations: deleteInfos.map((d) => ({ intent: "delete", ...d })),
-              text: insertText,
-              leftId,
-              rightId,
-              offset: leftOffset !== null ? leftOffset + 1 : 0,
-            },
-          }),
-        );
-      }
-
-      // 확정 콘텐츠만 업데이트 (chars는 서버 응답에서 업데이트)
-      lastConfirmedContentRef.current = confirmedContent;
-      // 삭제만 있는 경우에만 로컬에서 chars 업데이트
-      // 삽입이 있는 경우 서버 응답에서 ID를 받아야 하므로 서버 응답을 기다림
-      if (deleteCount > 0 && insertText.length === 0) {
-        const newConfirmedChars = [...lastChars];
-        newConfirmedChars.splice(deleteStart, deleteCount);
-        lastConfirmedCharsRef.current = newConfirmedChars;
-      }
-      // 삽입이 있는 경우: 서버 응답(docOp/docOpBatch)에서 lastConfirmedCharsRef 업데이트됨
-    },
-    [docStatus],
-  );
-
-  // 디바운스된 전송 함수
-  const debouncedSend = useCallback(
-    (content: string, cursorPos: number) => {
-      // 기존 타이머 취소
-      if (debounceTimerRef.current) {
-        clearTimeout(debounceTimerRef.current);
-      }
-
-      pendingChangesRef.current = { content, cursorPos };
-
-      // 0.2초 디바운싱
-      debounceTimerRef.current = setTimeout(() => {
-        if (pendingChangesRef.current) {
-          sendConfirmedChanges(pendingChangesRef.current.content);
-          pendingChangesRef.current = null;
-        }
-      }, 200);
-    },
-    [sendConfirmedChanges],
-  );
-
-  // 즉시 전송 (커서 이동 시)
-  const flushPendingChanges = useCallback(() => {
-    if (debounceTimerRef.current) {
-      clearTimeout(debounceTimerRef.current);
-      debounceTimerRef.current = null;
-    }
-
-    if (pendingChangesRef.current) {
-      sendConfirmedChanges(pendingChangesRef.current.content);
-      pendingChangesRef.current = null;
-    }
-  }, [sendConfirmedChanges]);
-
-  // 텍스트 입력 처리 (IME 디바운싱 적용)
-  const handleTextChange = (e: React.ChangeEvent<HTMLTextAreaElement>) => {
-    const newValue = e.target.value;
-    const cursorPos = e.target.selectionStart || 0;
-
-    // 문서가 잠금 상태면 편집 불가
-    if (docStatus === DOC_STATUS.LOCKED) {
-      showToast("⚠️ 문서가 잠금 상태입니다.", 2000);
-      return;
-    }
-
-    // 로컬 UI 즉시 업데이트 (낙관적 업데이트)
-    setDocContent(newValue);
-
-    // 커서가 이동했는지 확인 (입력 확정 감지)
-    const lastCursorPos = lastCursorPosRef.current;
-    const cursorMoved = Math.abs(cursorPos - lastCursorPos) > 1;
-
-    if (cursorMoved && !isComposingRef.current) {
-      // 커서가 크게 이동하면 즉시 전송
-      flushPendingChanges();
-      sendConfirmedChanges(newValue);
-    } else {
-      // 디바운싱 적용
-      debouncedSend(newValue, cursorPos);
-    }
-
-    lastCursorPosRef.current = cursorPos;
-  };
-
-  // IME 조합 시작
-  const handleCompositionStart = () => {
-    isComposingRef.current = true;
-  };
-
-  // IME 조합 종료
-  const handleCompositionEnd = (
-    e: React.CompositionEvent<HTMLTextAreaElement>,
-  ) => {
-    isComposingRef.current = false;
-    // 조합 완료 후 전송
-    const target = e.target as HTMLTextAreaElement;
-    const newValue = target.value;
-    const cursorPos = target.selectionStart || 0;
-
-    // 디바운싱 적용 (즉시 전송하지 않음)
-    debouncedSend(newValue, cursorPos);
-    lastCursorPosRef.current = cursorPos;
-  };
-
-  // 키보드 이벤트 처리 (특수 키)
-  const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
-    // 문서가 잠금 상태면 편집 불가
-    if (docStatus === DOC_STATUS.LOCKED) {
-      if (
-        !e.ctrlKey &&
-        !e.metaKey &&
-        e.key !== "ArrowUp" &&
-        e.key !== "ArrowDown" &&
-        e.key !== "ArrowLeft" &&
-        e.key !== "ArrowRight"
-      ) {
-        e.preventDefault();
-        showToast("⚠️ 문서가 잠금 상태입니다.", 2000);
-      }
-      return;
-    }
-
-    // 방향키나 특수 키로 커서가 이동하면 대기 중인 변경사항 즉시 전송
-    if (
-      e.key === "ArrowUp" ||
-      e.key === "ArrowDown" ||
-      e.key === "ArrowLeft" ||
-      e.key === "ArrowRight" ||
-      e.key === "Home" ||
-      e.key === "End" ||
-      e.key === "PageUp" ||
-      e.key === "PageDown"
-    ) {
-      flushPendingChanges();
-    }
-  };
-
-  // 포커스 잃을 때 대기 중인 변경사항 전송
-  const handleBlur = () => {
-    flushPendingChanges();
-  };
-
-  // 클릭 시 (커서 이동) 대기 중인 변경사항 전송
-  const handleClick = () => {
-    // 클릭으로 커서가 이동했을 수 있으므로 약간의 딜레이 후 확인
-    setTimeout(() => {
-      if (textareaRef.current) {
-        const cursorPos = textareaRef.current.selectionStart || 0;
-        if (Math.abs(cursorPos - lastCursorPosRef.current) > 0) {
-          flushPendingChanges();
-          lastCursorPosRef.current = cursorPos;
-        }
-      }
-    }, 10);
   };
 
   // 트리 노드 렌더링 (드래그앤드랍 지원)
@@ -3329,37 +2249,16 @@ export default function Home() {
                     }`}
                   >
                     {docStatus === DOC_STATUS.NORMAL
-                      ? "편집 가능"
+                      ? "정상"
                       : docStatus === DOC_STATUS.LOCKED
                         ? "잠금"
                         : "삭제됨"}
                   </span>
-                  {/* 오너 전용 버튼 */}
-                  {currentChannel.myPermission === 0 && (
-                    <>
-                      <button
-                        onClick={syncDocument}
-                        disabled={docStatus === DOC_STATUS.LOCKED}
-                        className="px-3 py-1 text-xs bg-blue-600 hover:bg-blue-700 disabled:bg-gray-600 disabled:cursor-not-allowed rounded transition-colors"
-                        title="Redis → Supabase 동기화"
-                      >
-                        🔄 동기화
-                      </button>
-                      <button
-                        onClick={createSnapshot}
-                        disabled={docStatus === DOC_STATUS.LOCKED}
-                        className="px-3 py-1 text-xs bg-purple-600 hover:bg-purple-700 disabled:bg-gray-600 disabled:cursor-not-allowed rounded transition-colors"
-                        title="스냅샷 생성 (로그 초기화)"
-                      >
-                        📸 스냅샷
-                      </button>
-                    </>
-                  )}
                 </div>
               </div>
             </div>
 
-            {/* 에디터 영역 */}
+            {/* 문서 내용 표시 영역 (읽기 전용) */}
             <div className="flex-1 p-4 overflow-hidden">
               {isDocLoading ? (
                 <div className="flex items-center justify-center h-full">
@@ -3387,24 +2286,14 @@ export default function Home() {
                   </div>
                 </div>
               ) : (
-                <textarea
-                  ref={textareaRef}
-                  value={docContent}
-                  onChange={handleTextChange}
-                  onKeyDown={handleKeyDown}
-                  onCompositionStart={handleCompositionStart}
-                  onCompositionEnd={handleCompositionEnd}
-                  onBlur={handleBlur}
-                  onClick={handleClick}
-                  disabled={docStatus !== DOC_STATUS.NORMAL}
-                  placeholder="문서 내용을 입력하세요..."
-                  className={`w-full h-full resize-none bg-gray-900 text-gray-100 p-4 rounded-lg border focus:outline-none focus:ring-2 focus:ring-blue-500 font-mono text-sm ${
-                    docStatus === DOC_STATUS.NORMAL
-                      ? "border-gray-700"
-                      : "border-yellow-600/50 bg-gray-900/50 cursor-not-allowed"
-                  }`}
+                <div
+                  className="w-full h-full bg-gray-900 text-gray-100 p-4 rounded-lg border border-gray-700 font-mono text-sm overflow-auto whitespace-pre-wrap"
                   style={{ minHeight: "300px" }}
-                />
+                >
+                  {docContent || (
+                    <span className="text-gray-500">문서 내용이 없습니다.</span>
+                  )}
+                </div>
               )}
             </div>
 
@@ -3418,13 +2307,6 @@ export default function Home() {
               </div>
               <div className="flex items-center gap-4">
                 <span>버전: {localVersion}</span>
-                <button
-                  onClick={getDocStatus}
-                  className="hover:text-white transition-colors"
-                  title="상태 새로고침"
-                >
-                  🔄
-                </button>
               </div>
             </div>
           </div>
