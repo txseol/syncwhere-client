@@ -806,8 +806,11 @@ export default function Home() {
                     : 0;
 
                   if (data.op === "insert") {
-                    // 삽입 연산 적용
+                    // 삽입 연산 적용 (단일 문자 또는 청크)
+                    // 청크: data.text, 단일: data.char
+                    const insertChars = data.text || data.char || "";
                     const currentChars = [...docCharsRef.current];
+
                     // 이진 탐색으로 삽입 위치 찾기
                     let lo = 0;
                     let hi = currentChars.length;
@@ -820,10 +823,18 @@ export default function Home() {
                       }
                     }
                     const insertPos = lo;
-                    currentChars.splice(lo, 0, {
-                      id: data.id,
-                      char: data.char,
-                    });
+
+                    // 청크의 각 문자를 개별 CharNode로 삽입
+                    // (첫 문자는 chunk ID, 나머지는 가상 ID)
+                    const newNodes: CharNode[] = [];
+                    for (let i = 0; i < insertChars.length; i++) {
+                      newNodes.push({
+                        id: i === 0 ? data.id : `${data.id}:${i}`,
+                        char: insertChars[i],
+                      });
+                    }
+                    currentChars.splice(lo, 0, ...newNodes);
+
                     // ref와 state 모두 업데이트
                     docCharsRef.current = currentChars;
                     setDocChars(currentChars);
@@ -841,7 +852,7 @@ export default function Home() {
                           // 삽입 위치가 커서 앞이면 커서도 이동
                           const newCursorPos =
                             insertPos <= savedCursorPos
-                              ? savedCursorPos + 1
+                              ? savedCursorPos + insertChars.length
                               : savedCursorPos;
                           textareaRef.current.setSelectionRange(
                             newCursorPos,
@@ -853,15 +864,29 @@ export default function Home() {
                     }
 
                     addChannelLog(
-                      `✏️ 삽입: "${data.char}" (by ${data.editedBy?.slice(0, 8) || "unknown"})`,
+                      `✏️ 삽입: "${insertChars.length > 10 ? insertChars.slice(0, 10) + "..." : insertChars}" (by ${data.editedBy?.slice(0, 8) || "unknown"})`,
                     );
                   } else if (data.op === "delete") {
                     // 삭제 연산 적용
                     const currentChars = [...docCharsRef.current];
-                    const idx = currentChars.findIndex((c) => c.id === data.id);
-                    if (idx !== -1) {
-                      const deletePos = idx;
-                      currentChars.splice(idx, 1);
+                    // 청크 ID로 시작하는 모든 문자 삭제 (청크 전체 삭제)
+                    const deleteIndices: number[] = [];
+                    for (let i = 0; i < currentChars.length; i++) {
+                      if (
+                        currentChars[i].id === data.id ||
+                        currentChars[i].id.startsWith(`${data.id}:`)
+                      ) {
+                        deleteIndices.push(i);
+                      }
+                    }
+
+                    if (deleteIndices.length > 0) {
+                      const deletePos = deleteIndices[0];
+                      const deleteCount = deleteIndices.length;
+                      // 뒤에서부터 삭제
+                      for (let i = deleteIndices.length - 1; i >= 0; i--) {
+                        currentChars.splice(deleteIndices[i], 1);
+                      }
                       // ref와 state 모두 업데이트
                       docCharsRef.current = currentChars;
                       setDocChars(currentChars);
@@ -881,7 +906,7 @@ export default function Home() {
                             // 삭제 위치가 커서 앞이면 커서도 조정
                             const newCursorPos =
                               deletePos < savedCursorPos
-                                ? Math.max(0, savedCursorPos - 1)
+                                ? Math.max(0, savedCursorPos - deleteCount)
                                 : savedCursorPos;
                             textareaRef.current.setSelectionRange(
                               newCursorPos,
@@ -903,7 +928,7 @@ export default function Home() {
                 }
                 break;
 
-              // === LSEQ Batch 편집 이벤트 (여러 문자 동시 처리) ===
+              // === LSEQ Batch 편집 이벤트 (여러 문자/청크 동시 처리) ===
               case "docOpBatch":
                 if (
                   data.docId === currentDocRef.current?.docId &&
@@ -921,8 +946,13 @@ export default function Home() {
                   const currentChars = [...docCharsRef.current];
 
                   for (const op of data.operations) {
-                    if (op.op === "insert") {
-                      // 삽입 연산 적용
+                    // === 청크 삽입 (insertText) 또는 단일 삽입 (insert) ===
+                    if (op.op === "insertText" || op.op === "insert") {
+                      // 청크: op.text, 단일: op.char
+                      const insertChars = op.text || op.char || "";
+                      if (insertChars.length === 0) continue;
+
+                      // 이진 탐색으로 삽입 위치 찾기
                       let lo = 0;
                       let hi = currentChars.length;
                       while (lo < hi) {
@@ -933,26 +963,59 @@ export default function Home() {
                           hi = mid;
                         }
                       }
+
                       // 다른 사람의 편집인 경우에만 커서 조정 계산
                       if (
                         !isMyEdit &&
                         lo <= savedCursorPos + cursorAdjustment
                       ) {
-                        cursorAdjustment++;
+                        cursorAdjustment += insertChars.length;
                       }
-                      currentChars.splice(lo, 0, { id: op.id, char: op.char });
+
+                      // 청크의 각 문자를 개별 CharNode로 삽입
+                      const newNodes: CharNode[] = [];
+                      for (let i = 0; i < insertChars.length; i++) {
+                        newNodes.push({
+                          id: i === 0 ? op.id : `${op.id}:${i}`,
+                          char: insertChars[i],
+                        });
+                      }
+                      currentChars.splice(lo, 0, ...newNodes);
                     } else if (op.op === "delete") {
-                      // 삭제 연산 적용
-                      const idx = currentChars.findIndex((c) => c.id === op.id);
-                      if (idx !== -1) {
+                      // === 삭제 연산 (청크 전체 또는 단일 문자) ===
+                      // 청크 ID로 시작하는 모든 문자 찾기
+                      const deleteIndices: number[] = [];
+                      for (let i = 0; i < currentChars.length; i++) {
+                        if (
+                          currentChars[i].id === op.id ||
+                          currentChars[i].id.startsWith(`${op.id}:`)
+                        ) {
+                          deleteIndices.push(i);
+                        }
+                      }
+
+                      if (deleteIndices.length > 0) {
+                        const deletePos = deleteIndices[0];
+                        const deleteCount = deleteIndices.length;
+
                         // 다른 사람의 편집인 경우에만 커서 조정 계산
                         if (
                           !isMyEdit &&
-                          idx < savedCursorPos + cursorAdjustment
+                          deletePos < savedCursorPos + cursorAdjustment
                         ) {
-                          cursorAdjustment--;
+                          // 커서 앞에서 삭제된 문자 수만큼 조정
+                          const adjustedCursorPos =
+                            savedCursorPos + cursorAdjustment;
+                          const deletedBeforeCursor = deleteIndices.filter(
+                            (idx) => idx < adjustedCursorPos,
+                          ).length;
+                          cursorAdjustment -= deletedBeforeCursor;
                         }
-                        currentChars.splice(idx, 1);
+
+                        // 뒤에서부터 삭제
+                        for (let i = deleteIndices.length - 1; i >= 0; i--) {
+                          currentChars.splice(deleteIndices[i], 1);
+                        }
                       }
                     }
                   }
@@ -1934,24 +1997,16 @@ export default function Home() {
   // IME 및 디바운싱 처리 함수
   // ============================================
 
-  // 확정된 변경사항을 서버로 전송
+  // 확정된 변경사항을 서버로 전송 (청크 기반 최적화)
   const sendConfirmedChanges = useCallback(
     (confirmedContent: string) => {
       if (!currentDocRef.current || docStatus === DOC_STATUS.LOCKED) return;
+      if (wsRef.current?.readyState !== WebSocket.OPEN) return;
 
       const lastContent = lastConfirmedContentRef.current;
       if (confirmedContent === lastContent) return; // 변경 없음
 
       const chars = docCharsRef.current;
-
-      // diff 계산
-      const operations: Array<{
-        intent: "insert" | "delete";
-        leftId?: string | null;
-        rightId?: string | null;
-        value?: string;
-        id?: string;
-      }> = [];
 
       // 간단한 diff: 공통 prefix/suffix 찾기
       let prefixLen = 0;
@@ -1977,85 +2032,118 @@ export default function Home() {
       const insertStart = prefixLen;
       const insertEnd = confirmedContent.length - suffixLen;
 
-      // 삭제 연산 (뒤에서부터)
+      const deleteCount = deleteEnd - deleteStart;
+      const insertText = confirmedContent.slice(insertStart, insertEnd);
+
+      // 변경 없음
+      if (deleteCount === 0 && insertText.length === 0) return;
+
+      // 삭제 후의 chars 상태 계산
+      const adjustedChars = [...chars];
+      const deleteIds: string[] = [];
+
+      // 삭제할 ID 수집 (뒤에서부터)
       for (let i = deleteEnd - 1; i >= deleteStart; i--) {
         if (i < chars.length && chars[i]) {
-          operations.push({
-            intent: "delete",
-            id: chars[i].id,
-          });
+          deleteIds.push(chars[i].id);
         }
       }
 
-      // 삽입 연산
-      const insertText = confirmedContent.slice(insertStart, insertEnd);
-      if (insertText.length > 0) {
-        // 삭제 후의 chars 상태를 반영하여 leftId/rightId 계산
-        // 삭제된 수만큼 조정
-        const deletedCount = deleteEnd - deleteStart;
-        const adjustedChars = [...chars];
-        adjustedChars.splice(deleteStart, deletedCount);
-
-        for (let i = 0; i < insertText.length; i++) {
-          const insertPos = insertStart + i;
-          const leftId =
-            insertPos > 0 ? adjustedChars[insertPos - 1]?.id || null : null;
-          const rightId =
-            insertPos < adjustedChars.length
-              ? adjustedChars[insertPos]?.id || null
-              : null;
-
-          operations.push({
-            intent: "insert",
-            leftId,
-            rightId,
-            value: insertText[i],
-          });
-
-          // 다음 삽입을 위해 임시 char 추가 (ID는 서버에서 생성되므로 임시)
-          adjustedChars.splice(insertPos, 0, {
-            id: `temp_${i}`,
-            char: insertText[i],
-          });
-        }
+      // adjustedChars에서 삭제 반영
+      if (deleteCount > 0) {
+        adjustedChars.splice(deleteStart, deleteCount);
       }
 
-      if (operations.length === 0) return;
+      // leftId/rightId 계산 (삽입 위치 기준)
+      const leftId =
+        insertStart > 0 ? adjustedChars[insertStart - 1]?.id || null : null;
+      const rightId =
+        insertStart < adjustedChars.length
+          ? adjustedChars[insertStart]?.id || null
+          : null;
 
-      // 단일 연산이면 editDoc, 여러 개면 editDocBatch 사용
-      if (
-        operations.length === 1 &&
-        wsRef.current?.readyState === WebSocket.OPEN
-      ) {
-        const op = operations[0];
-        wsRef.current.send(
-          JSON.stringify({
-            event: "editDoc",
-            data: {
-              docId: currentDocRef.current.docId,
-              intent: op.intent,
-              ...(op.intent === "insert"
-                ? { leftId: op.leftId, rightId: op.rightId, value: op.value }
-                : { id: op.id }),
-            },
-          }),
-        );
-      } else if (wsRef.current?.readyState === WebSocket.OPEN) {
+      // === 청크 기반 전송 (서버 최적화 활용) ===
+
+      // Case 1: 삭제만 있는 경우
+      if (deleteIds.length > 0 && insertText.length === 0) {
+        if (deleteIds.length === 1) {
+          // 단일 삭제
+          wsRef.current.send(
+            JSON.stringify({
+              event: "editDoc",
+              data: {
+                docId: currentDocRef.current.docId,
+                intent: "delete",
+                id: deleteIds[0],
+              },
+            }),
+          );
+        } else {
+          // 복수 삭제 - batch
+          wsRef.current.send(
+            JSON.stringify({
+              event: "editDocBatch",
+              data: {
+                docId: currentDocRef.current.docId,
+                operations: deleteIds.map((id) => ({
+                  intent: "delete",
+                  id,
+                })),
+              },
+            }),
+          );
+        }
+      }
+      // Case 2: 삽입만 있는 경우
+      else if (deleteIds.length === 0 && insertText.length > 0) {
+        if (insertText.length === 1) {
+          // 단일 삽입
+          wsRef.current.send(
+            JSON.stringify({
+              event: "editDoc",
+              data: {
+                docId: currentDocRef.current.docId,
+                intent: "insert",
+                leftId,
+                rightId,
+                value: insertText,
+              },
+            }),
+          );
+        } else {
+          // 청크 삽입 (새로운 text 방식 사용)
+          wsRef.current.send(
+            JSON.stringify({
+              event: "editDocBatch",
+              data: {
+                docId: currentDocRef.current.docId,
+                text: insertText,
+                leftId,
+                rightId,
+              },
+            }),
+          );
+        }
+      }
+      // Case 3: 삭제 + 삽입 (교체)
+      else if (deleteIds.length > 0 && insertText.length > 0) {
+        // 삭제 operations + 청크 삽입을 함께 전송
+        const operations = deleteIds.map((id) => ({
+          intent: "delete" as const,
+          id,
+        }));
+
+        // 삽입은 text 방식으로 별도 전송하거나, operations에 추가
+        // 서버가 operations 처리 후 text를 처리하므로 함께 전송 가능
         wsRef.current.send(
           JSON.stringify({
             event: "editDocBatch",
             data: {
               docId: currentDocRef.current.docId,
-              operations: operations.map((op) =>
-                op.intent === "insert"
-                  ? {
-                      intent: op.intent,
-                      leftId: op.leftId,
-                      rightId: op.rightId,
-                      value: op.value,
-                    }
-                  : { intent: op.intent, id: op.id },
-              ),
+              operations,
+              text: insertText,
+              leftId,
+              rightId,
             },
           }),
         );
