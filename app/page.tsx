@@ -946,8 +946,110 @@ export default function Home() {
                   const currentChars = [...docCharsRef.current];
 
                   for (const op of data.operations) {
+                    // === 청크 분할(split) 연산 처리 ===
+                    if (op.op === "split") {
+                      // splitResult: { leftId, leftText, rightId, rightText }
+                      const {
+                        targetId,
+                        offset,
+                        insertId,
+                        insertText,
+                        splitResult,
+                      } = op;
+
+                      // 1. 기존 청크(targetId) 찾기
+                      const targetIdx = currentChars.findIndex(
+                        (c) =>
+                          c.id === targetId || c.id.startsWith(`${targetId}:`),
+                      );
+
+                      if (targetIdx !== -1) {
+                        // 기존 청크의 전체 범위 찾기
+                        const chunkStartIdx = targetIdx;
+                        let chunkEndIdx = targetIdx;
+                        while (
+                          chunkEndIdx + 1 < currentChars.length &&
+                          (currentChars[chunkEndIdx + 1].id === targetId ||
+                            currentChars[chunkEndIdx + 1].id.startsWith(
+                              `${targetId}:`,
+                            ))
+                        ) {
+                          chunkEndIdx++;
+                        }
+                        const chunkLength = chunkEndIdx - chunkStartIdx + 1;
+
+                        // 다른 사람의 편집인 경우 커서 조정 계산
+                        if (!isMyEdit) {
+                          const insertGlobalPos = chunkStartIdx + offset;
+                          if (
+                            insertGlobalPos <=
+                            savedCursorPos + cursorAdjustment
+                          ) {
+                            cursorAdjustment += insertText.length;
+                          }
+                        }
+
+                        // 2. 기존 청크 삭제
+                        currentChars.splice(chunkStartIdx, chunkLength);
+
+                        // 3. 분할된 청크들 삽입 (left + insert + right)
+                        const newNodes: CharNode[] = [];
+
+                        // 왼쪽 부분 (있으면)
+                        if (
+                          splitResult?.leftText &&
+                          splitResult.leftText.length > 0
+                        ) {
+                          for (
+                            let i = 0;
+                            i < splitResult.leftText.length;
+                            i++
+                          ) {
+                            newNodes.push({
+                              id:
+                                i === 0
+                                  ? splitResult.leftId
+                                  : `${splitResult.leftId}:${i}`,
+                              char: splitResult.leftText[i],
+                            });
+                          }
+                        }
+
+                        // 삽입된 텍스트
+                        if (insertText && insertText.length > 0) {
+                          for (let i = 0; i < insertText.length; i++) {
+                            newNodes.push({
+                              id: i === 0 ? insertId : `${insertId}:${i}`,
+                              char: insertText[i],
+                            });
+                          }
+                        }
+
+                        // 오른쪽 부분 (있으면)
+                        if (
+                          splitResult?.rightText &&
+                          splitResult.rightText.length > 0
+                        ) {
+                          for (
+                            let i = 0;
+                            i < splitResult.rightText.length;
+                            i++
+                          ) {
+                            newNodes.push({
+                              id:
+                                i === 0
+                                  ? splitResult.rightId
+                                  : `${splitResult.rightId}:${i}`,
+                              char: splitResult.rightText[i],
+                            });
+                          }
+                        }
+
+                        currentChars.splice(chunkStartIdx, 0, ...newNodes);
+                      }
+                    }
                     // === 청크 삽입 (insertText) 또는 단일 삽입 (insert) ===
-                    if (op.op === "insertText" || op.op === "insert") {
+                    else if (op.op === "insertText" || op.op === "insert") {
                       // 청크: op.text, 단일: op.char
                       const insertChars = op.text || op.char || "";
                       if (insertChars.length === 0) continue;
@@ -996,7 +1098,6 @@ export default function Home() {
 
                       if (deleteIndices.length > 0) {
                         const deletePos = deleteIndices[0];
-                        const deleteCount = deleteIndices.length;
 
                         // 다른 사람의 편집인 경우에만 커서 조정 계산
                         if (
@@ -1015,6 +1116,51 @@ export default function Home() {
                         // 뒤에서부터 삭제
                         for (let i = deleteIndices.length - 1; i >= 0; i--) {
                           currentChars.splice(deleteIndices[i], 1);
+                        }
+                      }
+                    } else if (op.op === "trim" || op.op === "update") {
+                      // === 부분 삭제 (청크 텍스트 수정) ===
+                      // 청크 ID로 시작하는 모든 문자 찾기
+                      const chunkIndices: number[] = [];
+                      for (let i = 0; i < currentChars.length; i++) {
+                        if (
+                          currentChars[i].id === op.id ||
+                          currentChars[i].id.startsWith(`${op.id}:`)
+                        ) {
+                          chunkIndices.push(i);
+                        }
+                      }
+
+                      if (chunkIndices.length > 0 && op.text !== undefined) {
+                        const chunkStartIdx = chunkIndices[0];
+
+                        // 다른 사람의 편집인 경우 커서 조정
+                        if (!isMyEdit) {
+                          const oldLen = chunkIndices.length;
+                          const newLen = op.text.length;
+                          if (
+                            chunkStartIdx <
+                            savedCursorPos + cursorAdjustment
+                          ) {
+                            cursorAdjustment += newLen - oldLen;
+                          }
+                        }
+
+                        // 기존 청크 삭제
+                        for (let i = chunkIndices.length - 1; i >= 0; i--) {
+                          currentChars.splice(chunkIndices[i], 1);
+                        }
+
+                        // 새 텍스트로 교체
+                        if (op.text.length > 0) {
+                          const newNodes: CharNode[] = [];
+                          for (let i = 0; i < op.text.length; i++) {
+                            newNodes.push({
+                              id: i === 0 ? op.id : `${op.id}:${i}`,
+                              char: op.text[i],
+                            });
+                          }
+                          currentChars.splice(chunkStartIdx, 0, ...newNodes);
                         }
                       }
                     }
