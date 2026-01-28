@@ -1066,7 +1066,7 @@ export default function Home() {
                   for (const op of data.operations) {
                     // === 청크 분할(split) 연산 처리 ===
                     if (op.op === "split") {
-                      // splitResult: { leftId, leftText, rightId, rightText }
+                      // splitResult: [{id, text}, ...] 배열 형태
                       const {
                         targetId,
                         offset,
@@ -1075,13 +1075,13 @@ export default function Home() {
                         splitResult,
                       } = op;
 
-                      // 1. 기존 청크(targetId) 찾기 (같은 ID를 가진 모든 문자)
+                      // 1. 기존 청크(targetId) 찾기
                       const targetIdx = currentChars.findIndex(
                         (c) => c.id === targetId,
                       );
 
                       if (targetIdx !== -1) {
-                        // 기존 청크의 전체 범위 찾기 (같은 ID를 가진 연속된 문자들)
+                        // 기존 청크의 전체 범위 찾기
                         const chunkStartIdx = targetIdx;
                         let chunkEndIdx = targetIdx;
                         while (
@@ -1093,8 +1093,8 @@ export default function Home() {
                         const chunkLength = chunkEndIdx - chunkStartIdx + 1;
 
                         // 다른 사람의 편집인 경우 커서 조정 계산
-                        if (!isMyEdit) {
-                          const insertGlobalPos = chunkStartIdx + offset;
+                        if (!isMyEdit && insertText) {
+                          const insertGlobalPos = chunkStartIdx + (offset || 0);
                           if (
                             insertGlobalPos <=
                             savedCursorPos + cursorAdjustment
@@ -1106,53 +1106,18 @@ export default function Home() {
                         // 2. 기존 청크 삭제
                         currentChars.splice(chunkStartIdx, chunkLength);
 
-                        // 3. 분할된 청크들 삽입 (left + insert + right)
+                        // 3. splitResult 배열로 새 청크들 삽입
                         const newNodes: CharNode[] = [];
-
-                        // 왼쪽 부분 (있으면)
-                        if (
-                          splitResult?.leftText &&
-                          splitResult.leftText.length > 0
-                        ) {
-                          for (
-                            let i = 0;
-                            i < splitResult.leftText.length;
-                            i++
-                          ) {
-                            newNodes.push({
-                              id: splitResult.leftId,
-                              offset: i,
-                              char: splitResult.leftText[i],
-                            });
-                          }
-                        }
-
-                        // 삽입된 텍스트
-                        if (insertText && insertText.length > 0) {
-                          for (let i = 0; i < insertText.length; i++) {
-                            newNodes.push({
-                              id: insertId,
-                              offset: i,
-                              char: insertText[i],
-                            });
-                          }
-                        }
-
-                        // 오른쪽 부분 (있으면)
-                        if (
-                          splitResult?.rightText &&
-                          splitResult.rightText.length > 0
-                        ) {
-                          for (
-                            let i = 0;
-                            i < splitResult.rightText.length;
-                            i++
-                          ) {
-                            newNodes.push({
-                              id: splitResult.rightId,
-                              offset: i,
-                              char: splitResult.rightText[i],
-                            });
+                        if (Array.isArray(splitResult)) {
+                          for (const chunk of splitResult) {
+                            const text = chunk.text || "";
+                            for (let i = 0; i < text.length; i++) {
+                              newNodes.push({
+                                id: chunk.id,
+                                offset: i,
+                                char: text[i],
+                              });
+                            }
                           }
                         }
 
