@@ -44,6 +44,12 @@ const DOC_STATUS = {
   LOCKED: 2, // 잠금 (동기화/스냅샷 작업 중)
 } as const;
 
+// LSEQ 문자 노드 인터페이스
+interface CharNode {
+  id: string; // LSEQ ID (예: "32768", "00000.12345")
+  char: string; // 문자 (단일 문자)
+}
+
 // 온라인 유저 인터페이스
 interface OnlineUser {
   id: string;
@@ -84,13 +90,15 @@ export default function Home() {
   const [channelLogs, setChannelLogs] = useState<string[]>([]);
   const [showChannelLogs, setShowChannelLogs] = useState(true);
 
-  // 문서 편집 상태
+  // 문서 편집 상태 (LSEQ 기반)
   const [currentDoc, setCurrentDoc] = useState<Document | null>(null);
   const [docContent, setDocContent] = useState<string>("");
+  const [docChars, setDocChars] = useState<CharNode[]>([]); // LSEQ chars 배열
   const [docStatus, setDocStatus] = useState<number>(DOC_STATUS.NORMAL);
   const [docViewers, setDocViewers] = useState<OnlineUser[]>([]);
   const [isDocLoading, setIsDocLoading] = useState(false);
   const [localVersion, setLocalVersion] = useState<string>("1.0.0");
+  const [cursorPosition, setCursorPosition] = useState<number>(0); // 커서 위치
 
   // 드래그앤드랍 상태
   const [dragItem, setDragItem] = useState<{
@@ -132,6 +140,42 @@ export default function Home() {
   const healthCheckIntervalRef = useRef<NodeJS.Timeout | null>(null);
   const toastTimeoutRef = useRef<NodeJS.Timeout | null>(null);
   const mountedRef = useRef(true);
+  const textareaRef = useRef<HTMLTextAreaElement | null>(null);
+
+  // ============================================
+  // LSEQ 유틸리티 함수
+  // ============================================
+
+  // LSEQ ID 비교 (문자열 비교로 충분 - 고정 자릿수 패딩)
+  const compareLseqId = useCallback((a: string, b: string): number => {
+    // 문자열 사전식 비교 (패딩된 숫자이므로 정상 작동)
+    if (a < b) return -1;
+    if (a > b) return 1;
+    return 0;
+  }, []);
+
+  // chars 배열에서 삽입 위치 찾기 (이진 탐색)
+  const findInsertIndex = useCallback(
+    (chars: CharNode[], id: string): number => {
+      let lo = 0;
+      let hi = chars.length;
+      while (lo < hi) {
+        const mid = (lo + hi) >> 1;
+        if (compareLseqId(chars[mid].id, id) < 0) {
+          lo = mid + 1;
+        } else {
+          hi = mid;
+        }
+      }
+      return lo;
+    },
+    [compareLseqId],
+  );
+
+  // chars 배열 → content 문자열 변환
+  const charsToContent = useCallback((chars: CharNode[]): string => {
+    return chars.map((c) => c.char).join("");
+  }, []);
 
   // 로그 추가 함수
   const addLog = useCallback((message: string) => {
@@ -686,9 +730,17 @@ export default function Home() {
               case "docEntered":
                 addChannelLog(`📄 문서 '${data.docName}' 열람 시작`);
                 setIsDocLoading(false);
-                // 문서 내용 설정
-                if (data.content !== undefined) {
+                // LSEQ chars 배열 설정
+                if (data.chars && Array.isArray(data.chars)) {
+                  setDocChars(data.chars);
+                  // content는 chars에서 생성
+                  const content = data.chars
+                    .map((c: CharNode) => c.char)
+                    .join("");
+                  setDocContent(content);
+                } else if (data.content !== undefined) {
                   setDocContent(data.content);
+                  setDocChars([]); // 레거시 호환
                 }
                 if (data.snapshotVersion) {
                   setLocalVersion(data.snapshotVersion);
@@ -696,12 +748,14 @@ export default function Home() {
                 if (data.viewingUsers) {
                   setDocViewers(data.viewingUsers);
                 }
+                if (data.status !== undefined) {
+                  setDocStatus(data.status);
+                }
                 // 현재 문서 정보 업데이트
                 setCurrentDoc((prev) =>
                   prev
                     ? {
                         ...prev,
-                        content: data.content,
                         snapshotVersion:
                           data.snapshotVersion || prev.snapshotVersion,
                         status: data.status ?? prev.status,
@@ -714,36 +768,66 @@ export default function Home() {
                 addChannelLog(`📄 문서 열람 종료`);
                 break;
 
-              // === 브로드캐스트 이벤트: 문서 편집 (다른 유저가 편집했을 때) ===
-              case "docEdited":
-                // 다른 유저가 편집한 내용 수신
+              // === LSEQ 문서 편집 이벤트 (서버 브로드캐스트) ===
+              case "docOp":
+                // 서버에서 브로드캐스트된 LSEQ 연산 적용
                 if (data.docId === currentDoc?.docId) {
+                  if (data.op === "insert") {
+                    // 삽입 연산 적용
+                    setDocChars((prev) => {
+                      const newChars = [...prev];
+                      // 이진 탐색으로 삽입 위치 찾기
+                      let lo = 0;
+                      let hi = newChars.length;
+                      while (lo < hi) {
+                        const mid = (lo + hi) >> 1;
+                        if (newChars[mid].id < data.id) {
+                          lo = mid + 1;
+                        } else {
+                          hi = mid;
+                        }
+                      }
+                      newChars.splice(lo, 0, { id: data.id, char: data.char });
+                      // content 업데이트
+                      const newContent = newChars.map((c) => c.char).join("");
+                      setDocContent(newContent);
+                      return newChars;
+                    });
+                    addChannelLog(
+                      `✏️ 삽입: "${data.char}" (by ${data.editedBy?.slice(0, 8) || "unknown"})`,
+                    );
+                  } else if (data.op === "delete") {
+                    // 삭제 연산 적용
+                    setDocChars((prev) => {
+                      const idx = prev.findIndex((c) => c.id === data.id);
+                      if (idx !== -1) {
+                        const newChars = [...prev];
+                        newChars.splice(idx, 1);
+                        // content 업데이트
+                        const newContent = newChars.map((c) => c.char).join("");
+                        setDocContent(newContent);
+                        return newChars;
+                      }
+                      return prev;
+                    });
+                    addChannelLog(
+                      `🗑️ 삭제: ID ${data.id} (by ${data.editedBy?.slice(0, 8) || "unknown"})`,
+                    );
+                  }
+                  // 버전 업데이트
+                  if (data.logVersion) {
+                    setLocalVersion(data.logVersion);
+                  }
+                }
+                break;
+
+              // === 브로드캐스트 이벤트: 문서 편집 (레거시 - 호환용) ===
+              case "docEdited":
+                // 이전 방식 (position 기반) - 레거시 호환
+                if (data.docId === currentDoc?.docId && data.operation) {
                   addChannelLog(
                     `✏️ ${data.email || "다른 유저"}님이 문서를 편집했습니다.`,
                   );
-                  // CRDT 로그 기반으로 로컬 콘텐츠 업데이트
-                  // 현재는 단순 덮어쓰기, 추후 CRDT 병합 로직 구현
-                  if (data.operation) {
-                    // operation 타입에 따라 처리
-                    const op = data.operation;
-                    if (op.type === "insert" && op.position !== undefined) {
-                      setDocContent((prev) => {
-                        const pos = Math.min(op.position, prev.length);
-                        return (
-                          prev.slice(0, pos) + (op.text || "") + prev.slice(pos)
-                        );
-                      });
-                    } else if (
-                      op.type === "delete" &&
-                      op.position !== undefined
-                    ) {
-                      setDocContent((prev) => {
-                        const pos = Math.min(op.position, prev.length);
-                        const len = op.length || 1;
-                        return prev.slice(0, pos) + prev.slice(pos + len);
-                      });
-                    }
-                  }
                   // 버전 업데이트
                   if (data.newVersion) {
                     setLocalVersion(data.newVersion);
@@ -1092,9 +1176,11 @@ export default function Home() {
     // 문서 관련 상태 초기화
     setCurrentDoc(null);
     setDocContent("");
+    setDocChars([]); // LSEQ chars 초기화
     setDocStatus(DOC_STATUS.NORMAL);
     setDocViewers([]);
     setLocalVersion("1.0.0");
+    setCursorPosition(0);
   };
 
   // 폴더 토글
@@ -1449,8 +1535,10 @@ export default function Home() {
     setIsDocLoading(true);
     setCurrentDoc(doc);
     setDocContent("");
+    setDocChars([]); // LSEQ chars 초기화
     setDocStatus(DOC_STATUS.NORMAL);
     setLocalVersion(doc.snapshotVersion || "1.0.0");
+    setCursorPosition(0);
 
     if (wsRef.current?.readyState === WebSocket.OPEN) {
       wsRef.current.send(
@@ -1488,39 +1576,85 @@ export default function Home() {
 
     setCurrentDoc(null);
     setDocContent("");
+    setDocChars([]); // LSEQ chars 초기화
     setDocStatus(DOC_STATUS.NORMAL);
     setDocViewers([]);
     setLocalVersion("1.0.0");
   };
 
-  // 문서 편집 (CRDT 로그 전송)
-  const editDocument = (operation: {
-    type: "insert" | "delete";
-    position: number;
-    text?: string;
-    length?: number;
-  }) => {
-    if (!currentDoc || !currentChannel) return;
+  // ============================================
+  // LSEQ 문서 편집 함수
+  // ============================================
 
-    // 문서가 잠금 상태면 편집 불가
-    if (docStatus === DOC_STATUS.LOCKED) {
-      showToast("⚠️ 문서가 잠금 상태입니다. 잠시 후 다시 시도해주세요.", 3000);
-      return;
-    }
+  // 문자 삽입 요청 (LSEQ 방식)
+  const insertChar = useCallback(
+    (cursorIndex: number, char: string) => {
+      if (!currentDoc || docStatus === DOC_STATUS.LOCKED) {
+        if (docStatus === DOC_STATUS.LOCKED) {
+          showToast(
+            "⚠️ 문서가 잠금 상태입니다. 잠시 후 다시 시도해주세요.",
+            3000,
+          );
+        }
+        return;
+      }
 
-    if (wsRef.current?.readyState === WebSocket.OPEN) {
-      wsRef.current.send(
-        JSON.stringify({
-          event: "editDoc",
-          data: {
-            time: Date.now(),
-            docId: currentDoc.docId,
-            operation,
-          },
-        }),
-      );
-    }
-  };
+      // 커서 위치 기준으로 leftId, rightId 결정
+      const leftId = cursorIndex > 0 ? docChars[cursorIndex - 1]?.id : null;
+      const rightId =
+        cursorIndex < docChars.length ? docChars[cursorIndex]?.id : null;
+
+      if (wsRef.current?.readyState === WebSocket.OPEN) {
+        wsRef.current.send(
+          JSON.stringify({
+            event: "editDoc",
+            data: {
+              docId: currentDoc.docId,
+              intent: "insert",
+              leftId: leftId,
+              rightId: rightId,
+              value: char,
+            },
+          }),
+        );
+      }
+    },
+    [currentDoc, docChars, docStatus, showToast],
+  );
+
+  // 문자 삭제 요청 (LSEQ 방식)
+  const deleteChar = useCallback(
+    (cursorIndex: number) => {
+      if (!currentDoc || docStatus === DOC_STATUS.LOCKED) {
+        if (docStatus === DOC_STATUS.LOCKED) {
+          showToast(
+            "⚠️ 문서가 잠금 상태입니다. 잠시 후 다시 시도해주세요.",
+            3000,
+          );
+        }
+        return;
+      }
+
+      if (cursorIndex < 0 || cursorIndex >= docChars.length) return;
+
+      const charId = docChars[cursorIndex]?.id;
+      if (!charId) return;
+
+      if (wsRef.current?.readyState === WebSocket.OPEN) {
+        wsRef.current.send(
+          JSON.stringify({
+            event: "editDoc",
+            data: {
+              docId: currentDoc.docId,
+              intent: "delete",
+              id: charId,
+            },
+          }),
+        );
+      }
+    },
+    [currentDoc, docChars, docStatus, showToast],
+  );
 
   // 문서 동기화 요청 (오너만)
   const syncDocument = () => {
@@ -1591,12 +1725,19 @@ export default function Home() {
     }
   };
 
-  // 텍스트 입력 처리 (편집)
+  // 텍스트 입력 처리 (LSEQ 기반 편집)
   const handleTextChange = (e: React.ChangeEvent<HTMLTextAreaElement>) => {
     const newValue = e.target.value;
     const oldValue = docContent;
+    const cursorPos = e.target.selectionStart || 0;
 
-    // 간단한 diff 계산 (삽입/삭제 감지)
+    // 문서가 잠금 상태면 편집 불가
+    if (docStatus === DOC_STATUS.LOCKED) {
+      showToast("⚠️ 문서가 잠금 상태입니다.", 2000);
+      return;
+    }
+
+    // diff 계산
     if (newValue.length > oldValue.length) {
       // 삽입
       const diffLen = newValue.length - oldValue.length;
@@ -1607,11 +1748,10 @@ export default function Home() {
       }
       const insertedText = newValue.slice(pos, pos + diffLen);
 
-      editDocument({
-        type: "insert",
-        position: pos,
-        text: insertedText,
-      });
+      // 각 문자를 순차적으로 삽입
+      for (let i = 0; i < insertedText.length; i++) {
+        insertChar(pos + i, insertedText[i]);
+      }
     } else if (newValue.length < oldValue.length) {
       // 삭제
       const diffLen = oldValue.length - newValue.length;
@@ -1621,14 +1761,34 @@ export default function Home() {
         pos++;
       }
 
-      editDocument({
-        type: "delete",
-        position: pos,
-        length: diffLen,
-      });
+      // 각 문자를 순차적으로 삭제 (뒤에서부터)
+      for (let i = diffLen - 1; i >= 0; i--) {
+        deleteChar(pos + i);
+      }
     }
 
-    setDocContent(newValue);
+    // 로컬 상태는 서버 응답(docOp)으로 업데이트되므로 여기서는 변경하지 않음
+    // 단, 빠른 UI 응답을 위해 낙관적 업데이트 (옵션)
+    // setDocContent(newValue);
+    setCursorPosition(cursorPos);
+  };
+
+  // 키보드 이벤트 처리 (특수 키)
+  const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
+    // 문서가 잠금 상태면 편집 불가
+    if (docStatus === DOC_STATUS.LOCKED) {
+      if (
+        !e.ctrlKey &&
+        !e.metaKey &&
+        e.key !== "ArrowUp" &&
+        e.key !== "ArrowDown" &&
+        e.key !== "ArrowLeft" &&
+        e.key !== "ArrowRight"
+      ) {
+        e.preventDefault();
+        showToast("⚠️ 문서가 잠금 상태입니다.", 2000);
+      }
+    }
   };
 
   // 트리 노드 렌더링 (드래그앤드랍 지원)
@@ -2472,8 +2632,10 @@ export default function Home() {
                 </div>
               ) : (
                 <textarea
+                  ref={textareaRef}
                   value={docContent}
                   onChange={handleTextChange}
+                  onKeyDown={handleKeyDown}
                   disabled={docStatus !== DOC_STATUS.NORMAL}
                   placeholder="문서 내용을 입력하세요..."
                   className={`w-full h-full resize-none bg-gray-900 text-gray-100 p-4 rounded-lg border focus:outline-none focus:ring-2 focus:ring-blue-500 font-mono text-sm ${
