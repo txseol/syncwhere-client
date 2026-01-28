@@ -812,18 +812,49 @@ export default function Home() {
                     const insertChars = data.text || data.char || "";
                     const currentChars = [...docCharsRef.current];
 
-                    // 이진 탐색으로 삽입 위치 찾기
-                    let lo = 0;
-                    let hi = currentChars.length;
-                    while (lo < hi) {
-                      const mid = (lo + hi) >> 1;
-                      if (currentChars[mid].id < data.id) {
-                        lo = mid + 1;
+                    let insertPos: number;
+
+                    // leftId === rightId인 경우: 청크 내부 삽입 (offset 기반)
+                    if (
+                      data.leftId &&
+                      data.rightId &&
+                      data.leftId === data.rightId
+                    ) {
+                      const chunkStartIdx = currentChars.findIndex(
+                        (c) => c.id === data.leftId,
+                      );
+                      if (chunkStartIdx !== -1) {
+                        const offset =
+                          typeof data.offset === "number" ? data.offset : 0;
+                        insertPos = chunkStartIdx + offset;
                       } else {
-                        hi = mid;
+                        // 청크를 찾지 못하면 ID 기반 이진탐색
+                        let lo = 0;
+                        let hi = currentChars.length;
+                        while (lo < hi) {
+                          const mid = (lo + hi) >> 1;
+                          if (currentChars[mid].id < data.id) {
+                            lo = mid + 1;
+                          } else {
+                            hi = mid;
+                          }
+                        }
+                        insertPos = lo;
                       }
+                    } else {
+                      // 일반 삽입: ID 기반 이진 탐색
+                      let lo = 0;
+                      let hi = currentChars.length;
+                      while (lo < hi) {
+                        const mid = (lo + hi) >> 1;
+                        if (currentChars[mid].id < data.id) {
+                          lo = mid + 1;
+                        } else {
+                          hi = mid;
+                        }
+                      }
+                      insertPos = lo;
                     }
-                    const insertPos = lo;
 
                     // 청크의 각 문자를 개별 CharNode로 삽입 (동일 청크 ID, 다른 offset)
                     const newNodes: CharNode[] = [];
@@ -834,7 +865,7 @@ export default function Home() {
                         char: insertChars[i],
                       });
                     }
-                    currentChars.splice(lo, 0, ...newNodes);
+                    currentChars.splice(insertPos, 0, ...newNodes);
 
                     // ref와 state 모두 업데이트
                     docCharsRef.current = currentChars;
@@ -932,6 +963,80 @@ export default function Home() {
                     }
                     addChannelLog(
                       `🗑️ 삭제: ID ${data.id}${typeof data.offset === "number" ? `:${data.offset}` : ""} (by ${data.editedBy?.slice(0, 8) || "unknown"})`,
+                    );
+                  } else if (data.op === "split") {
+                    // split 연산: 청크 분할 후 새 문자 삽입
+                    // splitResult: [{id, text}, {id, text}] 형태
+                    const currentChars = [...docCharsRef.current];
+                    const targetId = data.targetId;
+
+                    // 기존 청크 찾기
+                    const targetIdx = currentChars.findIndex(
+                      (c) => c.id === targetId,
+                    );
+
+                    if (targetIdx !== -1) {
+                      // 기존 청크의 전체 범위 찾기
+                      let chunkEndIdx = targetIdx;
+                      while (
+                        chunkEndIdx + 1 < currentChars.length &&
+                        currentChars[chunkEndIdx + 1].id === targetId
+                      ) {
+                        chunkEndIdx++;
+                      }
+                      const chunkLength = chunkEndIdx - targetIdx + 1;
+
+                      // 기존 청크 삭제
+                      currentChars.splice(targetIdx, chunkLength);
+
+                      // splitResult로 새 청크들 삽입
+                      const newNodes: CharNode[] = [];
+                      if (data.splitResult && Array.isArray(data.splitResult)) {
+                        for (const chunk of data.splitResult) {
+                          const text = chunk.text || "";
+                          for (let i = 0; i < text.length; i++) {
+                            newNodes.push({
+                              id: chunk.id,
+                              offset: i,
+                              char: text[i],
+                            });
+                          }
+                        }
+                      }
+                      currentChars.splice(targetIdx, 0, ...newNodes);
+
+                      // 커서 조정 (다른 사람 편집인 경우)
+                      const insertedLen =
+                        newNodes.length > chunkLength
+                          ? newNodes.length - chunkLength
+                          : 0;
+
+                      docCharsRef.current = currentChars;
+                      setDocChars(currentChars);
+                      const newContent = currentChars
+                        .map((c) => c.char)
+                        .join("");
+                      lastConfirmedContentRef.current = newContent;
+
+                      if (!isMyEdit) {
+                        setDocContent(newContent);
+                        requestAnimationFrame(() => {
+                          if (textareaRef.current) {
+                            const newCursorPos =
+                              targetIdx <= savedCursorPos
+                                ? savedCursorPos + insertedLen
+                                : savedCursorPos;
+                            textareaRef.current.setSelectionRange(
+                              newCursorPos,
+                              newCursorPos,
+                            );
+                            lastCursorPosRef.current = newCursorPos;
+                          }
+                        });
+                      }
+                    }
+                    addChannelLog(
+                      `✂️ 분할: ${data.targetId} → ${data.splitResult?.length || 0}개 (by ${data.editedBy?.slice(0, 8) || "unknown"})`,
                     );
                   }
                   // 버전 업데이트
@@ -1060,22 +1165,53 @@ export default function Home() {
                       const insertChars = op.text || op.char || "";
                       if (insertChars.length === 0) continue;
 
-                      // 이진 탐색으로 삽입 위치 찾기
-                      let lo = 0;
-                      let hi = currentChars.length;
-                      while (lo < hi) {
-                        const mid = (lo + hi) >> 1;
-                        if (currentChars[mid].id < op.id) {
-                          lo = mid + 1;
+                      let insertPos: number;
+
+                      // leftId === rightId인 경우: 청크 내부 삽입 (offset 기반)
+                      if (op.leftId && op.rightId && op.leftId === op.rightId) {
+                        // 해당 청크의 시작 위치 찾기
+                        const chunkStartIdx = currentChars.findIndex(
+                          (c) => c.id === op.leftId,
+                        );
+                        if (chunkStartIdx !== -1) {
+                          // 청크 시작 + offset 위치에 삽입
+                          // op.offset이 없으면 청크 끝에 삽입
+                          const offset =
+                            typeof op.offset === "number" ? op.offset : 0;
+                          insertPos = chunkStartIdx + offset;
                         } else {
-                          hi = mid;
+                          // 청크를 찾지 못하면 ID 기반 이진탐색
+                          let lo = 0;
+                          let hi = currentChars.length;
+                          while (lo < hi) {
+                            const mid = (lo + hi) >> 1;
+                            if (currentChars[mid].id < op.id) {
+                              lo = mid + 1;
+                            } else {
+                              hi = mid;
+                            }
+                          }
+                          insertPos = lo;
                         }
+                      } else {
+                        // 일반 삽입: ID 기반 이진 탐색
+                        let lo = 0;
+                        let hi = currentChars.length;
+                        while (lo < hi) {
+                          const mid = (lo + hi) >> 1;
+                          if (currentChars[mid].id < op.id) {
+                            lo = mid + 1;
+                          } else {
+                            hi = mid;
+                          }
+                        }
+                        insertPos = lo;
                       }
 
                       // 다른 사람의 편집인 경우에만 커서 조정 계산
                       if (
                         !isMyEdit &&
-                        lo <= savedCursorPos + cursorAdjustment
+                        insertPos <= savedCursorPos + cursorAdjustment
                       ) {
                         cursorAdjustment += insertChars.length;
                       }
@@ -1089,7 +1225,7 @@ export default function Home() {
                           char: insertChars[i],
                         });
                       }
-                      currentChars.splice(lo, 0, ...newNodes);
+                      currentChars.splice(insertPos, 0, ...newNodes);
                     } else if (op.op === "delete") {
                       // === 삭제 연산 (offset 있으면 단일 문자, 없으면 청크 전체) ===
                       const deleteIndices: number[] = [];
