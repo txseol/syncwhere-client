@@ -149,6 +149,7 @@ export default function Home() {
   // IME 처리 및 디바운싱을 위한 ref
   const debounceTimerRef = useRef<NodeJS.Timeout | null>(null);
   const lastConfirmedContentRef = useRef<string>(""); // 마지막 확정 전송된 콘텐츠
+  const lastConfirmedCharsRef = useRef<CharNode[]>([]); // 마지막 확정 전송된 chars 배열
   const lastCursorPosRef = useRef<number>(0); // 마지막 커서 위치
   const isComposingRef = useRef<boolean>(false); // IME 조합 중 여부
   const pendingChangesRef = useRef<{
@@ -756,12 +757,14 @@ export default function Home() {
                   setDocContent(content);
                   // 확정 콘텐츠 초기화
                   lastConfirmedContentRef.current = content;
+                  lastConfirmedCharsRef.current = [...data.chars];
                   lastCursorPosRef.current = 0;
                 } else if (data.content !== undefined) {
                   setDocContent(data.content);
                   docCharsRef.current = []; // 레거시 호환
                   setDocChars([]);
                   lastConfirmedContentRef.current = data.content;
+                  lastConfirmedCharsRef.current = [];
                   lastCursorPosRef.current = 0;
                 }
                 if (data.snapshotVersion) {
@@ -872,8 +875,9 @@ export default function Home() {
                     setDocChars(currentChars);
                     // content 업데이트
                     const newContent = currentChars.map((c) => c.char).join("");
-                    // 확정 콘텐츠 업데이트
+                    // 확정 콘텐츠 업데이트 (서버 응답 기준)
                     lastConfirmedContentRef.current = newContent;
+                    lastConfirmedCharsRef.current = [...currentChars];
 
                     // 자신의 편집이면 docContent는 이미 로컬에서 업데이트됨 (setDocContent 호출 안함)
                     // 다른 사람의 편집인 경우에만 docContent 업데이트 및 커서 위치 조정
@@ -938,8 +942,9 @@ export default function Home() {
                       const newContent = currentChars
                         .map((c) => c.char)
                         .join("");
-                      // 확정 콘텐츠 업데이트
+                      // 확정 콘텐츠 업데이트 (서버 응답 기준)
                       lastConfirmedContentRef.current = newContent;
+                      lastConfirmedCharsRef.current = [...currentChars];
 
                       // 자신의 편집이면 docContent는 이미 로컬에서 업데이트됨 (setDocContent 호출 안함)
                       // 다른 사람의 편집인 경우에만 docContent 업데이트 및 커서 위치 조정
@@ -1017,6 +1022,7 @@ export default function Home() {
                         .map((c) => c.char)
                         .join("");
                       lastConfirmedContentRef.current = newContent;
+                      lastConfirmedCharsRef.current = [...currentChars];
 
                       if (!isMyEdit) {
                         setDocContent(newContent);
@@ -1287,8 +1293,9 @@ export default function Home() {
                   setDocChars(currentChars);
                   // content 업데이트
                   const newContent = currentChars.map((c) => c.char).join("");
-                  // 확정 콘텐츠도 업데이트
+                  // 확정 콘텐츠도 업데이트 (서버 응답 기준)
                   lastConfirmedContentRef.current = newContent;
+                  lastConfirmedCharsRef.current = [...currentChars];
 
                   // 자신의 편집이면 docContent는 이미 로컬에서 업데이트됨 (setDocContent 호출 안함)
                   // 다른 사람의 편집인 경우에만 docContent 업데이트 및 커서 위치 복원
@@ -2047,6 +2054,7 @@ export default function Home() {
     setCursorPosition(0);
     // IME 관련 ref 초기화
     lastConfirmedContentRef.current = "";
+    lastConfirmedCharsRef.current = [];
     lastCursorPosRef.current = 0;
     isComposingRef.current = false;
     pendingChangesRef.current = null;
@@ -2099,6 +2107,7 @@ export default function Home() {
     setLocalVersion("1.0.0");
     // IME 관련 ref 초기화
     lastConfirmedContentRef.current = "";
+    lastConfirmedCharsRef.current = [];
     lastCursorPosRef.current = 0;
     isComposingRef.current = false;
     pendingChangesRef.current = null;
@@ -2268,7 +2277,8 @@ export default function Home() {
       const lastContent = lastConfirmedContentRef.current;
       if (confirmedContent === lastContent) return;
 
-      const chars = docCharsRef.current;
+      // 마지막 확정 시점의 chars 사용 (docCharsRef가 아님!)
+      const lastChars = lastConfirmedCharsRef.current;
 
       // diff: 공통 prefix/suffix 찾기
       let prefixLen = 0;
@@ -2300,16 +2310,16 @@ export default function Home() {
 
       if (deleteCount === 0 && insertText.length === 0) return;
 
-      // 삭제할 문자 정보 수집
+      // 삭제할 문자 정보 수집 (lastConfirmedChars 기준)
       const deleteInfos: { id: string; offset: number }[] = [];
       for (let i = deleteStart; i < deleteEnd; i++) {
-        if (i < chars.length && chars[i]) {
-          deleteInfos.push({ id: chars[i].id, offset: chars[i].offset });
+        if (i < lastChars.length && lastChars[i]) {
+          deleteInfos.push({ id: lastChars[i].id, offset: lastChars[i].offset });
         }
       }
 
       // 삭제 후 chars 상태 (삽입 위치 계산용)
-      const adjustedChars = [...chars];
+      const adjustedChars = [...lastChars];
       if (deleteCount > 0) {
         adjustedChars.splice(deleteStart, deleteCount);
       }
@@ -2384,7 +2394,27 @@ export default function Home() {
         );
       }
 
+      // 확정 상태 업데이트 (전송 후 즉시)
       lastConfirmedContentRef.current = confirmedContent;
+      // 로컬에서 삭제/삽입 적용한 chars를 새 확정 상태로 저장
+      const newConfirmedChars = [...lastChars];
+      if (deleteCount > 0) {
+        newConfirmedChars.splice(deleteStart, deleteCount);
+      }
+      // 삽입은 서버 응답에서 ID를 받아야 하므로 여기서는 placeholder로 추가
+      // (서버 응답이 오면 docCharsRef가 업데이트되고, 그걸 lastConfirmedChars로 동기화)
+      if (insertText.length > 0) {
+        const placeholderChars: CharNode[] = [];
+        for (let i = 0; i < insertText.length; i++) {
+          placeholderChars.push({
+            id: `__pending__`,
+            offset: i,
+            char: insertText[i],
+          });
+        }
+        newConfirmedChars.splice(insertStart, 0, ...placeholderChars);
+      }
+      lastConfirmedCharsRef.current = newConfirmedChars;
     },
     [docStatus],
   );
