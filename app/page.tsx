@@ -144,6 +144,16 @@ export default function Home() {
   const currentDocRef = useRef<Document | null>(null); // 현재 문서 참조 (클로저 문제 해결용)
   const docCharsRef = useRef<CharNode[]>([]); // chars 배열 참조
 
+  // IME 처리 및 디바운싱을 위한 ref
+  const debounceTimerRef = useRef<NodeJS.Timeout | null>(null);
+  const lastConfirmedContentRef = useRef<string>(""); // 마지막 확정 전송된 콘텐츠
+  const lastCursorPosRef = useRef<number>(0); // 마지막 커서 위치
+  const isComposingRef = useRef<boolean>(false); // IME 조합 중 여부
+  const pendingChangesRef = useRef<{
+    content: string;
+    cursorPos: number;
+  } | null>(null); // 대기 중인 변경사항
+
   // ============================================
   // LSEQ 유틸리티 함수
   // ============================================
@@ -742,10 +752,15 @@ export default function Home() {
                     .map((c: CharNode) => c.char)
                     .join("");
                   setDocContent(content);
+                  // 확정 콘텐츠 초기화
+                  lastConfirmedContentRef.current = content;
+                  lastCursorPosRef.current = 0;
                 } else if (data.content !== undefined) {
                   setDocContent(data.content);
                   docCharsRef.current = []; // 레거시 호환
                   setDocChars([]);
+                  lastConfirmedContentRef.current = data.content;
+                  lastCursorPosRef.current = 0;
                 }
                 if (data.snapshotVersion) {
                   setLocalVersion(data.snapshotVersion);
@@ -781,6 +796,10 @@ export default function Home() {
                 // 서버에서 브로드캐스트된 LSEQ 연산 적용
                 // currentDocRef를 사용하여 클로저 문제 해결
                 if (data.docId === currentDocRef.current?.docId) {
+                  // 현재 커서 위치 저장
+                  const savedCursorPos =
+                    textareaRef.current?.selectionStart || 0;
+
                   if (data.op === "insert") {
                     // 삽입 연산 적용
                     const currentChars = [...docCharsRef.current];
@@ -795,6 +814,7 @@ export default function Home() {
                         hi = mid;
                       }
                     }
+                    const insertPos = lo;
                     currentChars.splice(lo, 0, {
                       id: data.id,
                       char: data.char,
@@ -805,6 +825,24 @@ export default function Home() {
                     // content 업데이트
                     const newContent = currentChars.map((c) => c.char).join("");
                     setDocContent(newContent);
+                    // 확정 콘텐츠 업데이트
+                    lastConfirmedContentRef.current = newContent;
+
+                    // 커서 위치 복원 (삽입 위치가 커서 앞이면 커서도 이동)
+                    requestAnimationFrame(() => {
+                      if (textareaRef.current) {
+                        const newCursorPos =
+                          insertPos <= savedCursorPos
+                            ? savedCursorPos + 1
+                            : savedCursorPos;
+                        textareaRef.current.setSelectionRange(
+                          newCursorPos,
+                          newCursorPos,
+                        );
+                        lastCursorPosRef.current = newCursorPos;
+                      }
+                    });
+
                     addChannelLog(
                       `✏️ 삽입: "${data.char}" (by ${data.editedBy?.slice(0, 8) || "unknown"})`,
                     );
@@ -822,11 +860,110 @@ export default function Home() {
                         .map((c) => c.char)
                         .join("");
                       setDocContent(newContent);
+                      // 확정 콘텐츠 업데이트
+                      lastConfirmedContentRef.current = newContent;
+
+                      // 커서 위치 복원 (삭제 위치가 커서 앞이면 커서도 조정)
+                      requestAnimationFrame(() => {
+                        if (textareaRef.current) {
+                          const newCursorPos =
+                            idx < savedCursorPos
+                              ? Math.max(0, savedCursorPos - 1)
+                              : savedCursorPos;
+                          textareaRef.current.setSelectionRange(
+                            newCursorPos,
+                            newCursorPos,
+                          );
+                          lastCursorPosRef.current = newCursorPos;
+                        }
+                      });
                     }
                     addChannelLog(
                       `🗑️ 삭제: ID ${data.id} (by ${data.editedBy?.slice(0, 8) || "unknown"})`,
                     );
                   }
+                  // 버전 업데이트
+                  if (data.logVersion) {
+                    setLocalVersion(data.logVersion);
+                  }
+                }
+                break;
+
+              // === LSEQ Batch 편집 이벤트 (여러 문자 동시 처리) ===
+              case "docOpBatch":
+                if (
+                  data.docId === currentDocRef.current?.docId &&
+                  data.operations
+                ) {
+                  // 현재 커서 위치 저장
+                  const savedCursorPos =
+                    textareaRef.current?.selectionStart || 0;
+                  let cursorAdjustment = 0;
+
+                  const currentChars = [...docCharsRef.current];
+
+                  for (const op of data.operations) {
+                    if (op.op === "insert") {
+                      // 삽입 연산 적용
+                      let lo = 0;
+                      let hi = currentChars.length;
+                      while (lo < hi) {
+                        const mid = (lo + hi) >> 1;
+                        if (currentChars[mid].id < op.id) {
+                          lo = mid + 1;
+                        } else {
+                          hi = mid;
+                        }
+                      }
+                      // 삽입 위치가 커서 앞이면 커서 조정
+                      if (lo <= savedCursorPos + cursorAdjustment) {
+                        cursorAdjustment++;
+                      }
+                      currentChars.splice(lo, 0, { id: op.id, char: op.char });
+                    } else if (op.op === "delete") {
+                      // 삭제 연산 적용
+                      const idx = currentChars.findIndex((c) => c.id === op.id);
+                      if (idx !== -1) {
+                        // 삭제 위치가 커서 앞이면 커서 조정
+                        if (idx < savedCursorPos + cursorAdjustment) {
+                          cursorAdjustment--;
+                        }
+                        currentChars.splice(idx, 1);
+                      }
+                    }
+                  }
+
+                  // ref와 state 모두 업데이트
+                  docCharsRef.current = currentChars;
+                  setDocChars(currentChars);
+                  // content 업데이트 (커서 위치 유지)
+                  const newContent = currentChars.map((c) => c.char).join("");
+                  setDocContent(newContent);
+                  // 확정 콘텐츠도 업데이트
+                  lastConfirmedContentRef.current = newContent;
+
+                  // 커서 위치 복원
+                  requestAnimationFrame(() => {
+                    if (textareaRef.current) {
+                      const newCursorPos = Math.max(
+                        0,
+                        Math.min(
+                          savedCursorPos + cursorAdjustment,
+                          newContent.length,
+                        ),
+                      );
+                      textareaRef.current.setSelectionRange(
+                        newCursorPos,
+                        newCursorPos,
+                      );
+                      lastCursorPosRef.current = newCursorPos;
+                    }
+                  });
+
+                  addChannelLog(
+                    `✏️ Batch: ${data.operations.length}개 연산 (by ${data.editedBy?.slice(0, 8) || "unknown"})`,
+                  );
+
                   // 버전 업데이트
                   if (data.logVersion) {
                     setLocalVersion(data.logVersion);
@@ -1556,6 +1693,15 @@ export default function Home() {
     setDocStatus(DOC_STATUS.NORMAL);
     setLocalVersion(doc.snapshotVersion || "1.0.0");
     setCursorPosition(0);
+    // IME 관련 ref 초기화
+    lastConfirmedContentRef.current = "";
+    lastCursorPosRef.current = 0;
+    isComposingRef.current = false;
+    pendingChangesRef.current = null;
+    if (debounceTimerRef.current) {
+      clearTimeout(debounceTimerRef.current);
+      debounceTimerRef.current = null;
+    }
 
     if (wsRef.current?.readyState === WebSocket.OPEN) {
       wsRef.current.send(
@@ -1599,6 +1745,15 @@ export default function Home() {
     setDocStatus(DOC_STATUS.NORMAL);
     setDocViewers([]);
     setLocalVersion("1.0.0");
+    // IME 관련 ref 초기화
+    lastConfirmedContentRef.current = "";
+    lastCursorPosRef.current = 0;
+    isComposingRef.current = false;
+    pendingChangesRef.current = null;
+    if (debounceTimerRef.current) {
+      clearTimeout(debounceTimerRef.current);
+      debounceTimerRef.current = null;
+    }
   };
 
   // ============================================
@@ -1748,10 +1903,180 @@ export default function Home() {
     }
   };
 
-  // 텍스트 입력 처리 (LSEQ 기반 편집)
+  // ============================================
+  // IME 및 디바운싱 처리 함수
+  // ============================================
+
+  // 확정된 변경사항을 서버로 전송
+  const sendConfirmedChanges = useCallback(
+    (confirmedContent: string) => {
+      if (!currentDocRef.current || docStatus === DOC_STATUS.LOCKED) return;
+
+      const lastContent = lastConfirmedContentRef.current;
+      if (confirmedContent === lastContent) return; // 변경 없음
+
+      const chars = docCharsRef.current;
+
+      // diff 계산
+      const operations: Array<{
+        intent: "insert" | "delete";
+        leftId?: string | null;
+        rightId?: string | null;
+        value?: string;
+        id?: string;
+      }> = [];
+
+      // 간단한 diff: 공통 prefix/suffix 찾기
+      let prefixLen = 0;
+      const minLen = Math.min(lastContent.length, confirmedContent.length);
+      while (
+        prefixLen < minLen &&
+        lastContent[prefixLen] === confirmedContent[prefixLen]
+      ) {
+        prefixLen++;
+      }
+
+      let suffixLen = 0;
+      while (
+        suffixLen < minLen - prefixLen &&
+        lastContent[lastContent.length - 1 - suffixLen] ===
+          confirmedContent[confirmedContent.length - 1 - suffixLen]
+      ) {
+        suffixLen++;
+      }
+
+      const deleteStart = prefixLen;
+      const deleteEnd = lastContent.length - suffixLen;
+      const insertStart = prefixLen;
+      const insertEnd = confirmedContent.length - suffixLen;
+
+      // 삭제 연산 (뒤에서부터)
+      for (let i = deleteEnd - 1; i >= deleteStart; i--) {
+        if (i < chars.length && chars[i]) {
+          operations.push({
+            intent: "delete",
+            id: chars[i].id,
+          });
+        }
+      }
+
+      // 삽입 연산
+      const insertText = confirmedContent.slice(insertStart, insertEnd);
+      if (insertText.length > 0) {
+        // 삭제 후의 chars 상태를 반영하여 leftId/rightId 계산
+        // 삭제된 수만큼 조정
+        const deletedCount = deleteEnd - deleteStart;
+        const adjustedChars = [...chars];
+        adjustedChars.splice(deleteStart, deletedCount);
+
+        for (let i = 0; i < insertText.length; i++) {
+          const insertPos = insertStart + i;
+          const leftId =
+            insertPos > 0 ? adjustedChars[insertPos - 1]?.id || null : null;
+          const rightId =
+            insertPos < adjustedChars.length
+              ? adjustedChars[insertPos]?.id || null
+              : null;
+
+          operations.push({
+            intent: "insert",
+            leftId,
+            rightId,
+            value: insertText[i],
+          });
+
+          // 다음 삽입을 위해 임시 char 추가 (ID는 서버에서 생성되므로 임시)
+          adjustedChars.splice(insertPos, 0, {
+            id: `temp_${i}`,
+            char: insertText[i],
+          });
+        }
+      }
+
+      if (operations.length === 0) return;
+
+      // 단일 연산이면 editDoc, 여러 개면 editDocBatch 사용
+      if (
+        operations.length === 1 &&
+        wsRef.current?.readyState === WebSocket.OPEN
+      ) {
+        const op = operations[0];
+        wsRef.current.send(
+          JSON.stringify({
+            event: "editDoc",
+            data: {
+              docId: currentDocRef.current.docId,
+              intent: op.intent,
+              ...(op.intent === "insert"
+                ? { leftId: op.leftId, rightId: op.rightId, value: op.value }
+                : { id: op.id }),
+            },
+          }),
+        );
+      } else if (wsRef.current?.readyState === WebSocket.OPEN) {
+        wsRef.current.send(
+          JSON.stringify({
+            event: "editDocBatch",
+            data: {
+              docId: currentDocRef.current.docId,
+              operations: operations.map((op) =>
+                op.intent === "insert"
+                  ? {
+                      intent: op.intent,
+                      leftId: op.leftId,
+                      rightId: op.rightId,
+                      value: op.value,
+                    }
+                  : { intent: op.intent, id: op.id },
+              ),
+            },
+          }),
+        );
+      }
+
+      // 확정 콘텐츠 업데이트
+      lastConfirmedContentRef.current = confirmedContent;
+    },
+    [docStatus],
+  );
+
+  // 디바운스된 전송 함수
+  const debouncedSend = useCallback(
+    (content: string, cursorPos: number) => {
+      // 기존 타이머 취소
+      if (debounceTimerRef.current) {
+        clearTimeout(debounceTimerRef.current);
+      }
+
+      pendingChangesRef.current = { content, cursorPos };
+
+      // 0.2초 디바운싱
+      debounceTimerRef.current = setTimeout(() => {
+        if (pendingChangesRef.current) {
+          sendConfirmedChanges(pendingChangesRef.current.content);
+          pendingChangesRef.current = null;
+        }
+      }, 200);
+    },
+    [sendConfirmedChanges],
+  );
+
+  // 즉시 전송 (커서 이동 시)
+  const flushPendingChanges = useCallback(() => {
+    if (debounceTimerRef.current) {
+      clearTimeout(debounceTimerRef.current);
+      debounceTimerRef.current = null;
+    }
+
+    if (pendingChangesRef.current) {
+      sendConfirmedChanges(pendingChangesRef.current.content);
+      pendingChangesRef.current = null;
+    }
+  }, [sendConfirmedChanges]);
+
+  // 텍스트 입력 처리 (IME 디바운싱 적용)
   const handleTextChange = (e: React.ChangeEvent<HTMLTextAreaElement>) => {
     const newValue = e.target.value;
-    const oldValue = docContent;
     const cursorPos = e.target.selectionStart || 0;
 
     // 문서가 잠금 상태면 편집 불가
@@ -1760,40 +2085,43 @@ export default function Home() {
       return;
     }
 
-    // diff 계산
-    if (newValue.length > oldValue.length) {
-      // 삽입
-      const diffLen = newValue.length - oldValue.length;
-      // 삽입 위치 찾기
-      let pos = 0;
-      while (pos < oldValue.length && oldValue[pos] === newValue[pos]) {
-        pos++;
-      }
-      const insertedText = newValue.slice(pos, pos + diffLen);
+    // 로컬 UI 즉시 업데이트 (낙관적 업데이트)
+    setDocContent(newValue);
 
-      // 각 문자를 순차적으로 삽입
-      for (let i = 0; i < insertedText.length; i++) {
-        insertChar(pos + i, insertedText[i]);
-      }
-    } else if (newValue.length < oldValue.length) {
-      // 삭제
-      const diffLen = oldValue.length - newValue.length;
-      // 삭제 위치 찾기
-      let pos = 0;
-      while (pos < newValue.length && oldValue[pos] === newValue[pos]) {
-        pos++;
-      }
+    // 커서가 이동했는지 확인 (입력 확정 감지)
+    const lastCursorPos = lastCursorPosRef.current;
+    const cursorMoved = Math.abs(cursorPos - lastCursorPos) > 1;
 
-      // 각 문자를 순차적으로 삭제 (뒤에서부터)
-      for (let i = diffLen - 1; i >= 0; i--) {
-        deleteChar(pos + i);
-      }
+    if (cursorMoved && !isComposingRef.current) {
+      // 커서가 크게 이동하면 즉시 전송
+      flushPendingChanges();
+      sendConfirmedChanges(newValue);
+    } else {
+      // 디바운싱 적용
+      debouncedSend(newValue, cursorPos);
     }
 
-    // 로컬 상태는 서버 응답(docOp)으로 업데이트되므로 여기서는 변경하지 않음
-    // 단, 빠른 UI 응답을 위해 낙관적 업데이트 (옵션)
-    // setDocContent(newValue);
-    setCursorPosition(cursorPos);
+    lastCursorPosRef.current = cursorPos;
+  };
+
+  // IME 조합 시작
+  const handleCompositionStart = () => {
+    isComposingRef.current = true;
+  };
+
+  // IME 조합 종료
+  const handleCompositionEnd = (
+    e: React.CompositionEvent<HTMLTextAreaElement>,
+  ) => {
+    isComposingRef.current = false;
+    // 조합 완료 후 전송
+    const target = e.target as HTMLTextAreaElement;
+    const newValue = target.value;
+    const cursorPos = target.selectionStart || 0;
+
+    // 디바운싱 적용 (즉시 전송하지 않음)
+    debouncedSend(newValue, cursorPos);
+    lastCursorPosRef.current = cursorPos;
   };
 
   // 키보드 이벤트 처리 (특수 키)
@@ -1811,7 +2139,41 @@ export default function Home() {
         e.preventDefault();
         showToast("⚠️ 문서가 잠금 상태입니다.", 2000);
       }
+      return;
     }
+
+    // 방향키나 특수 키로 커서가 이동하면 대기 중인 변경사항 즉시 전송
+    if (
+      e.key === "ArrowUp" ||
+      e.key === "ArrowDown" ||
+      e.key === "ArrowLeft" ||
+      e.key === "ArrowRight" ||
+      e.key === "Home" ||
+      e.key === "End" ||
+      e.key === "PageUp" ||
+      e.key === "PageDown"
+    ) {
+      flushPendingChanges();
+    }
+  };
+
+  // 포커스 잃을 때 대기 중인 변경사항 전송
+  const handleBlur = () => {
+    flushPendingChanges();
+  };
+
+  // 클릭 시 (커서 이동) 대기 중인 변경사항 전송
+  const handleClick = () => {
+    // 클릭으로 커서가 이동했을 수 있으므로 약간의 딜레이 후 확인
+    setTimeout(() => {
+      if (textareaRef.current) {
+        const cursorPos = textareaRef.current.selectionStart || 0;
+        if (Math.abs(cursorPos - lastCursorPosRef.current) > 0) {
+          flushPendingChanges();
+          lastCursorPosRef.current = cursorPos;
+        }
+      }
+    }, 10);
   };
 
   // 트리 노드 렌더링 (드래그앤드랍 지원)
@@ -2659,6 +3021,10 @@ export default function Home() {
                   value={docContent}
                   onChange={handleTextChange}
                   onKeyDown={handleKeyDown}
+                  onCompositionStart={handleCompositionStart}
+                  onCompositionEnd={handleCompositionEnd}
+                  onBlur={handleBlur}
+                  onClick={handleClick}
                   disabled={docStatus !== DOC_STATUS.NORMAL}
                   placeholder="문서 내용을 입력하세요..."
                   className={`w-full h-full resize-none bg-gray-900 text-gray-100 p-4 rounded-lg border focus:outline-none focus:ring-2 focus:ring-blue-500 font-mono text-sm ${
