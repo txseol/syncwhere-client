@@ -870,11 +870,26 @@ export default function Home() {
                   } else if (data.op === "delete") {
                     // 삭제 연산 적용
                     const currentChars = [...docCharsRef.current];
-                    // 청크 ID가 일치하는 모든 문자 삭제 (청크 전체 삭제)
+
+                    // offset이 있으면 해당 위치의 문자만 삭제, 없으면 청크 전체 삭제
                     const deleteIndices: number[] = [];
-                    for (let i = 0; i < currentChars.length; i++) {
-                      if (currentChars[i].id === data.id) {
-                        deleteIndices.push(i);
+                    if (typeof data.offset === "number") {
+                      // 특정 offset의 문자만 삭제
+                      for (let i = 0; i < currentChars.length; i++) {
+                        if (
+                          currentChars[i].id === data.id &&
+                          currentChars[i].offset === data.offset
+                        ) {
+                          deleteIndices.push(i);
+                          break;
+                        }
+                      }
+                    } else {
+                      // 청크 ID가 일치하는 모든 문자 삭제 (청크 전체 삭제)
+                      for (let i = 0; i < currentChars.length; i++) {
+                        if (currentChars[i].id === data.id) {
+                          deleteIndices.push(i);
+                        }
                       }
                     }
 
@@ -916,7 +931,7 @@ export default function Home() {
                       }
                     }
                     addChannelLog(
-                      `🗑️ 삭제: ID ${data.id} (by ${data.editedBy?.slice(0, 8) || "unknown"})`,
+                      `🗑️ 삭제: ID ${data.id}${typeof data.offset === "number" ? `:${data.offset}` : ""} (by ${data.editedBy?.slice(0, 8) || "unknown"})`,
                     );
                   }
                   // 버전 업데이트
@@ -1076,12 +1091,25 @@ export default function Home() {
                       }
                       currentChars.splice(lo, 0, ...newNodes);
                     } else if (op.op === "delete") {
-                      // === 삭제 연산 (청크 전체 또는 단일 문자) ===
-                      // 청크 ID가 일치하는 모든 문자 찾기
+                      // === 삭제 연산 (offset 있으면 단일 문자, 없으면 청크 전체) ===
                       const deleteIndices: number[] = [];
-                      for (let i = 0; i < currentChars.length; i++) {
-                        if (currentChars[i].id === op.id) {
-                          deleteIndices.push(i);
+                      if (typeof op.offset === "number") {
+                        // 특정 offset의 문자만 삭제
+                        for (let i = 0; i < currentChars.length; i++) {
+                          if (
+                            currentChars[i].id === op.id &&
+                            currentChars[i].offset === op.offset
+                          ) {
+                            deleteIndices.push(i);
+                            break;
+                          }
+                        }
+                      } else {
+                        // 청크 ID가 일치하는 모든 문자 삭제
+                        for (let i = 0; i < currentChars.length; i++) {
+                          if (currentChars[i].id === op.id) {
+                            deleteIndices.push(i);
+                          }
                         }
                       }
 
@@ -2137,11 +2165,11 @@ export default function Home() {
       if (wsRef.current?.readyState !== WebSocket.OPEN) return;
 
       const lastContent = lastConfirmedContentRef.current;
-      if (confirmedContent === lastContent) return; // 변경 없음
+      if (confirmedContent === lastContent) return;
 
       const chars = docCharsRef.current;
 
-      // 간단한 diff: 공통 prefix/suffix 찾기
+      // diff: 공통 prefix/suffix 찾기
       let prefixLen = 0;
       const minLen = Math.min(lastContent.length, confirmedContent.length);
       while (
@@ -2163,179 +2191,98 @@ export default function Home() {
       const deleteStart = prefixLen;
       const deleteEnd = lastContent.length - suffixLen;
       const insertStart = prefixLen;
-      const insertEnd = confirmedContent.length - suffixLen;
-
+      const insertText = confirmedContent.slice(
+        insertStart,
+        confirmedContent.length - suffixLen,
+      );
       const deleteCount = deleteEnd - deleteStart;
-      const insertText = confirmedContent.slice(insertStart, insertEnd);
 
-      // 변경 없음
       if (deleteCount === 0 && insertText.length === 0) return;
 
-      // === 삭제할 문자 정보 수집 (청크 ID + offset) ===
-      interface DeleteInfo {
-        id: string;
-        offset: number;
-      }
-      const deleteInfos: DeleteInfo[] = [];
-
+      // 삭제할 문자 정보 수집
+      const deleteInfos: { id: string; offset: number }[] = [];
       for (let i = deleteStart; i < deleteEnd; i++) {
         if (i < chars.length && chars[i]) {
-          deleteInfos.push({
-            id: chars[i].id,
-            offset: chars[i].offset,
-          });
+          deleteInfos.push({ id: chars[i].id, offset: chars[i].offset });
         }
       }
 
-      // 삭제 후의 chars 상태 계산 (삽입 위치 결정용)
+      // 삭제 후 chars 상태 (삽입 위치 계산용)
       const adjustedChars = [...chars];
       if (deleteCount > 0) {
         adjustedChars.splice(deleteStart, deleteCount);
       }
 
-      // === 삽입 위치 계산 (청크 ID + offset) ===
-      // 왼쪽 문자와 오른쪽 문자 정보
+      // 삽입 위치의 좌/우 문자 정보
       const leftChar = insertStart > 0 ? adjustedChars[insertStart - 1] : null;
       const rightChar =
         insertStart < adjustedChars.length ? adjustedChars[insertStart] : null;
 
       const leftId = leftChar?.id || null;
       const rightId = rightChar?.id || null;
+      const leftOffset = leftChar?.offset ?? null;
 
-      // 청크 내부 삽입 여부 판단 및 offset 계산
-      // leftId === rightId이면 같은 청크 내부 삽입 → offset 필요
-      let insertOffset: number | null = null;
-      if (leftId && rightId && leftId === rightId) {
-        // 같은 청크 내부 삽입: leftChar의 offset + 1 위치에 삽입
-        insertOffset = (leftChar?.offset ?? 0) + 1;
-      }
+      // 데이터 전송
+      const docId = currentDocRef.current.docId;
 
-      // === 청크 기반 전송 ===
-
-      // Case 1: 삭제만 있는 경우
       if (deleteInfos.length > 0 && insertText.length === 0) {
-        // 같은 청크의 연속 삭제는 하나의 trim 연산으로 최적화 가능
-        // 여기서는 단순히 개별 삭제로 처리 (서버에서 최적화)
-        if (deleteInfos.length === 1) {
-          // 단일 삭제 (offset 포함)
-          wsRef.current.send(
-            JSON.stringify({
-              event: "editDoc",
-              data: {
-                docId: currentDocRef.current.docId,
-                intent: "delete",
-                id: deleteInfos[0].id,
-                offset: deleteInfos[0].offset,
-              },
-            }),
-          );
-        } else {
-          // 복수 삭제 - batch (각각 offset 포함)
-          wsRef.current.send(
-            JSON.stringify({
-              event: "editDocBatch",
-              data: {
-                docId: currentDocRef.current.docId,
-                operations: deleteInfos.map((info) => ({
-                  intent: "delete",
-                  id: info.id,
-                  offset: info.offset,
-                })),
-              },
-            }),
-          );
-        }
-      }
-      // Case 2: 삽입만 있는 경우
-      else if (deleteInfos.length === 0 && insertText.length > 0) {
-        if (insertText.length === 1) {
-          // 단일 삽입
-          const insertData: {
-            docId: string;
-            intent: string;
-            leftId: string | null;
-            rightId: string | null;
-            value: string;
-            offset?: number;
-          } = {
-            docId: currentDocRef.current.docId,
-            intent: "insert",
-            leftId,
-            rightId,
-            value: insertText,
-          };
-          // 청크 내부 삽입이면 offset 추가
-          if (insertOffset !== null) {
-            insertData.offset = insertOffset;
-          }
-          wsRef.current.send(
-            JSON.stringify({
-              event: "editDoc",
-              data: insertData,
-            }),
-          );
-        } else {
-          // 청크 삽입 (text 방식)
-          const batchData: {
-            docId: string;
-            text: string;
-            leftId: string | null;
-            rightId: string | null;
-            offset?: number;
-          } = {
-            docId: currentDocRef.current.docId,
-            text: insertText,
-            leftId,
-            rightId,
-          };
-          // 청크 내부 삽입이면 offset 추가
-          if (insertOffset !== null) {
-            batchData.offset = insertOffset;
-          }
-          wsRef.current.send(
-            JSON.stringify({
-              event: "editDocBatch",
-              data: batchData,
-            }),
-          );
-        }
-      }
-      // Case 3: 삭제 + 삽입 (교체)
-      else if (deleteInfos.length > 0 && insertText.length > 0) {
-        // 삭제 operations + 청크 삽입을 함께 전송
-        const operations = deleteInfos.map((info) => ({
-          intent: "delete" as const,
-          id: info.id,
-          offset: info.offset,
-        }));
-
-        const batchData: {
-          docId: string;
-          operations: { intent: "delete"; id: string; offset: number }[];
-          text: string;
-          leftId: string | null;
-          rightId: string | null;
-          offset?: number;
-        } = {
-          docId: currentDocRef.current.docId,
-          operations,
-          text: insertText,
-          leftId,
-          rightId,
-        };
-        // 청크 내부 삽입이면 offset 추가
-        if (insertOffset !== null) {
-          batchData.offset = insertOffset;
-        }
+        // 삭제만
+        wsRef.current.send(
+          JSON.stringify({
+            event: deleteInfos.length === 1 ? "editDoc" : "editDocBatch",
+            data:
+              deleteInfos.length === 1
+                ? { docId, intent: "delete", ...deleteInfos[0] }
+                : {
+                    docId,
+                    operations: deleteInfos.map((d) => ({
+                      intent: "delete",
+                      ...d,
+                    })),
+                  },
+          }),
+        );
+      } else if (deleteInfos.length === 0 && insertText.length > 0) {
+        // 삽입만
+        wsRef.current.send(
+          JSON.stringify({
+            event: insertText.length === 1 ? "editDoc" : "editDocBatch",
+            data:
+              insertText.length === 1
+                ? {
+                    docId,
+                    intent: "insert",
+                    leftId,
+                    rightId,
+                    offset: leftOffset !== null ? leftOffset + 1 : 0,
+                    value: insertText,
+                  }
+                : {
+                    docId,
+                    text: insertText,
+                    leftId,
+                    rightId,
+                    offset: leftOffset !== null ? leftOffset + 1 : 0,
+                  },
+          }),
+        );
+      } else {
+        // 삭제 + 삽입
         wsRef.current.send(
           JSON.stringify({
             event: "editDocBatch",
-            data: batchData,
+            data: {
+              docId,
+              operations: deleteInfos.map((d) => ({ intent: "delete", ...d })),
+              text: insertText,
+              leftId,
+              rightId,
+              offset: leftOffset !== null ? leftOffset + 1 : 0,
+            },
           }),
         );
       }
 
-      // 확정 콘텐츠 업데이트
       lastConfirmedContentRef.current = confirmedContent;
     },
     [docStatus],
