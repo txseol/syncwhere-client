@@ -827,12 +827,13 @@ export default function Home() {
                     setDocChars(currentChars);
                     // content 업데이트
                     const newContent = currentChars.map((c) => c.char).join("");
-                    setDocContent(newContent);
                     // 확정 콘텐츠 업데이트
                     lastConfirmedContentRef.current = newContent;
 
-                    // 다른 사람의 편집인 경우에만 커서 위치 조정
+                    // 자신의 편집이면 docContent는 이미 로컬에서 업데이트됨 (setDocContent 호출 안함)
+                    // 다른 사람의 편집인 경우에만 docContent 업데이트 및 커서 위치 조정
                     if (!isMyEdit) {
+                      setDocContent(newContent);
                       requestAnimationFrame(() => {
                         if (textareaRef.current) {
                           // 삽입 위치가 커서 앞이면 커서도 이동
@@ -866,12 +867,13 @@ export default function Home() {
                       const newContent = currentChars
                         .map((c) => c.char)
                         .join("");
-                      setDocContent(newContent);
                       // 확정 콘텐츠 업데이트
                       lastConfirmedContentRef.current = newContent;
 
-                      // 다른 사람의 편집인 경우에만 커서 위치 조정
+                      // 자신의 편집이면 docContent는 이미 로컬에서 업데이트됨 (setDocContent 호출 안함)
+                      // 다른 사람의 편집인 경우에만 docContent 업데이트 및 커서 위치 조정
                       if (!isMyEdit) {
+                        setDocContent(newContent);
                         requestAnimationFrame(() => {
                           if (textareaRef.current) {
                             // 삭제 위치가 커서 앞이면 커서도 조정
@@ -957,12 +959,13 @@ export default function Home() {
                   setDocChars(currentChars);
                   // content 업데이트
                   const newContent = currentChars.map((c) => c.char).join("");
-                  setDocContent(newContent);
                   // 확정 콘텐츠도 업데이트
                   lastConfirmedContentRef.current = newContent;
 
-                  // 다른 사람의 편집인 경우에만 커서 위치 복원
+                  // 자신의 편집이면 docContent는 이미 로컬에서 업데이트됨 (setDocContent 호출 안함)
+                  // 다른 사람의 편집인 경우에만 docContent 업데이트 및 커서 위치 복원
                   if (!isMyEdit) {
+                    setDocContent(newContent);
                     requestAnimationFrame(() => {
                       if (textareaRef.current) {
                         const newCursorPos = Math.max(
