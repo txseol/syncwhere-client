@@ -47,7 +47,8 @@ const DOC_STATUS = {
 
 // LSEQ 문자 노드 인터페이스
 interface CharNode {
-  id: string; // LSEQ ID (예: "32768", "00000.12345")
+  id: string; // LSEQ ID (청크 ID) - 같은 청크의 문자들은 동일한 ID를 가짐
+  offset: number; // 청크 내 오프셋 (0부터 시작)
   char: string; // 문자 (단일 문자)
 }
 
@@ -824,12 +825,12 @@ export default function Home() {
                     }
                     const insertPos = lo;
 
-                    // 청크의 각 문자를 개별 CharNode로 삽입
-                    // (첫 문자는 chunk ID, 나머지는 가상 ID)
+                    // 청크의 각 문자를 개별 CharNode로 삽입 (동일 청크 ID, 다른 offset)
                     const newNodes: CharNode[] = [];
                     for (let i = 0; i < insertChars.length; i++) {
                       newNodes.push({
-                        id: i === 0 ? data.id : `${data.id}:${i}`,
+                        id: data.id,
+                        offset: i,
                         char: insertChars[i],
                       });
                     }
@@ -869,13 +870,10 @@ export default function Home() {
                   } else if (data.op === "delete") {
                     // 삭제 연산 적용
                     const currentChars = [...docCharsRef.current];
-                    // 청크 ID로 시작하는 모든 문자 삭제 (청크 전체 삭제)
+                    // 청크 ID가 일치하는 모든 문자 삭제 (청크 전체 삭제)
                     const deleteIndices: number[] = [];
                     for (let i = 0; i < currentChars.length; i++) {
-                      if (
-                        currentChars[i].id === data.id ||
-                        currentChars[i].id.startsWith(`${data.id}:`)
-                      ) {
+                      if (currentChars[i].id === data.id) {
                         deleteIndices.push(i);
                       }
                     }
@@ -957,22 +955,18 @@ export default function Home() {
                         splitResult,
                       } = op;
 
-                      // 1. 기존 청크(targetId) 찾기
+                      // 1. 기존 청크(targetId) 찾기 (같은 ID를 가진 모든 문자)
                       const targetIdx = currentChars.findIndex(
-                        (c) =>
-                          c.id === targetId || c.id.startsWith(`${targetId}:`),
+                        (c) => c.id === targetId,
                       );
 
                       if (targetIdx !== -1) {
-                        // 기존 청크의 전체 범위 찾기
+                        // 기존 청크의 전체 범위 찾기 (같은 ID를 가진 연속된 문자들)
                         const chunkStartIdx = targetIdx;
                         let chunkEndIdx = targetIdx;
                         while (
                           chunkEndIdx + 1 < currentChars.length &&
-                          (currentChars[chunkEndIdx + 1].id === targetId ||
-                            currentChars[chunkEndIdx + 1].id.startsWith(
-                              `${targetId}:`,
-                            ))
+                          currentChars[chunkEndIdx + 1].id === targetId
                         ) {
                           chunkEndIdx++;
                         }
@@ -1006,10 +1000,8 @@ export default function Home() {
                             i++
                           ) {
                             newNodes.push({
-                              id:
-                                i === 0
-                                  ? splitResult.leftId
-                                  : `${splitResult.leftId}:${i}`,
+                              id: splitResult.leftId,
+                              offset: i,
                               char: splitResult.leftText[i],
                             });
                           }
@@ -1019,7 +1011,8 @@ export default function Home() {
                         if (insertText && insertText.length > 0) {
                           for (let i = 0; i < insertText.length; i++) {
                             newNodes.push({
-                              id: i === 0 ? insertId : `${insertId}:${i}`,
+                              id: insertId,
+                              offset: i,
                               char: insertText[i],
                             });
                           }
@@ -1036,10 +1029,8 @@ export default function Home() {
                             i++
                           ) {
                             newNodes.push({
-                              id:
-                                i === 0
-                                  ? splitResult.rightId
-                                  : `${splitResult.rightId}:${i}`,
+                              id: splitResult.rightId,
+                              offset: i,
                               char: splitResult.rightText[i],
                             });
                           }
@@ -1074,24 +1065,22 @@ export default function Home() {
                         cursorAdjustment += insertChars.length;
                       }
 
-                      // 청크의 각 문자를 개별 CharNode로 삽입
+                      // 청크의 각 문자를 개별 CharNode로 삽입 (동일 청크 ID, 다른 offset)
                       const newNodes: CharNode[] = [];
                       for (let i = 0; i < insertChars.length; i++) {
                         newNodes.push({
-                          id: i === 0 ? op.id : `${op.id}:${i}`,
+                          id: op.id,
+                          offset: i,
                           char: insertChars[i],
                         });
                       }
                       currentChars.splice(lo, 0, ...newNodes);
                     } else if (op.op === "delete") {
                       // === 삭제 연산 (청크 전체 또는 단일 문자) ===
-                      // 청크 ID로 시작하는 모든 문자 찾기
+                      // 청크 ID가 일치하는 모든 문자 찾기
                       const deleteIndices: number[] = [];
                       for (let i = 0; i < currentChars.length; i++) {
-                        if (
-                          currentChars[i].id === op.id ||
-                          currentChars[i].id.startsWith(`${op.id}:`)
-                        ) {
+                        if (currentChars[i].id === op.id) {
                           deleteIndices.push(i);
                         }
                       }
@@ -1120,13 +1109,10 @@ export default function Home() {
                       }
                     } else if (op.op === "trim" || op.op === "update") {
                       // === 부분 삭제 (청크 텍스트 수정) ===
-                      // 청크 ID로 시작하는 모든 문자 찾기
+                      // 청크 ID가 일치하는 모든 문자 찾기
                       const chunkIndices: number[] = [];
                       for (let i = 0; i < currentChars.length; i++) {
-                        if (
-                          currentChars[i].id === op.id ||
-                          currentChars[i].id.startsWith(`${op.id}:`)
-                        ) {
+                        if (currentChars[i].id === op.id) {
                           chunkIndices.push(i);
                         }
                       }
@@ -1156,7 +1142,8 @@ export default function Home() {
                           const newNodes: CharNode[] = [];
                           for (let i = 0; i < op.text.length; i++) {
                             newNodes.push({
-                              id: i === 0 ? op.id : `${op.id}:${i}`,
+                              id: op.id,
+                              offset: i,
                               char: op.text[i],
                             });
                           }
