@@ -2314,7 +2314,10 @@ export default function Home() {
       const deleteInfos: { id: string; offset: number }[] = [];
       for (let i = deleteStart; i < deleteEnd; i++) {
         if (i < lastChars.length && lastChars[i]) {
-          deleteInfos.push({ id: lastChars[i].id, offset: lastChars[i].offset });
+          deleteInfos.push({
+            id: lastChars[i].id,
+            offset: lastChars[i].offset,
+          });
         }
       }
 
@@ -2394,27 +2397,16 @@ export default function Home() {
         );
       }
 
-      // 확정 상태 업데이트 (전송 후 즉시)
+      // 확정 콘텐츠만 업데이트 (chars는 서버 응답에서 업데이트)
       lastConfirmedContentRef.current = confirmedContent;
-      // 로컬에서 삭제/삽입 적용한 chars를 새 확정 상태로 저장
-      const newConfirmedChars = [...lastChars];
-      if (deleteCount > 0) {
+      // 삭제만 있는 경우에만 로컬에서 chars 업데이트
+      // 삽입이 있는 경우 서버 응답에서 ID를 받아야 하므로 서버 응답을 기다림
+      if (deleteCount > 0 && insertText.length === 0) {
+        const newConfirmedChars = [...lastChars];
         newConfirmedChars.splice(deleteStart, deleteCount);
+        lastConfirmedCharsRef.current = newConfirmedChars;
       }
-      // 삽입은 서버 응답에서 ID를 받아야 하므로 여기서는 placeholder로 추가
-      // (서버 응답이 오면 docCharsRef가 업데이트되고, 그걸 lastConfirmedChars로 동기화)
-      if (insertText.length > 0) {
-        const placeholderChars: CharNode[] = [];
-        for (let i = 0; i < insertText.length; i++) {
-          placeholderChars.push({
-            id: `__pending__`,
-            offset: i,
-            char: insertText[i],
-          });
-        }
-        newConfirmedChars.splice(insertStart, 0, ...placeholderChars);
-      }
-      lastConfirmedCharsRef.current = newConfirmedChars;
+      // 삽입이 있는 경우: 서버 응답(docOp/docOpBatch)에서 lastConfirmedCharsRef 업데이트됨
     },
     [docStatus],
   );
