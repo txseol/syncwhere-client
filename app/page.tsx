@@ -32,8 +32,17 @@ interface Document {
   dir: string;
   depth: number;
   createdAt: string;
-  snapshotVersion: number;
+  snapshotVersion: string; // 버전 형식: "서비스버전.스냅샷버전.로그버전" (예: "1.2.3")
+  status?: number; // 0: 정상, 1: 삭제됨, 2: 잠금
+  content?: string;
 }
+
+// 문서 상태 상수
+const DOC_STATUS = {
+  NORMAL: 0, // 정상 (편집 가능)
+  DELETED: 1, // 삭제됨
+  LOCKED: 2, // 잠금 (동기화/스냅샷 작업 중)
+} as const;
 
 // 온라인 유저 인터페이스
 interface OnlineUser {
@@ -74,6 +83,14 @@ export default function Home() {
   const [isChannelConnected, setIsChannelConnected] = useState(false);
   const [channelLogs, setChannelLogs] = useState<string[]>([]);
   const [showChannelLogs, setShowChannelLogs] = useState(true);
+
+  // 문서 편집 상태
+  const [currentDoc, setCurrentDoc] = useState<Document | null>(null);
+  const [docContent, setDocContent] = useState<string>("");
+  const [docStatus, setDocStatus] = useState<number>(DOC_STATUS.NORMAL);
+  const [docViewers, setDocViewers] = useState<OnlineUser[]>([]);
+  const [isDocLoading, setIsDocLoading] = useState(false);
+  const [localVersion, setLocalVersion] = useState<string>("1.0.0");
 
   // 드래그앤드랍 상태
   const [dragItem, setDragItem] = useState<{
@@ -668,10 +685,140 @@ export default function Home() {
               // === 문서 열람 입장/퇴장 ===
               case "docEntered":
                 addChannelLog(`📄 문서 '${data.docName}' 열람 시작`);
+                setIsDocLoading(false);
+                // 문서 내용 설정
+                if (data.content !== undefined) {
+                  setDocContent(data.content);
+                }
+                if (data.snapshotVersion) {
+                  setLocalVersion(data.snapshotVersion);
+                }
+                if (data.viewingUsers) {
+                  setDocViewers(data.viewingUsers);
+                }
+                // 현재 문서 정보 업데이트
+                setCurrentDoc((prev) =>
+                  prev
+                    ? {
+                        ...prev,
+                        content: data.content,
+                        snapshotVersion:
+                          data.snapshotVersion || prev.snapshotVersion,
+                        status: data.status ?? prev.status,
+                      }
+                    : null,
+                );
                 break;
 
               case "docLeft":
                 addChannelLog(`📄 문서 열람 종료`);
+                break;
+
+              // === 브로드캐스트 이벤트: 문서 편집 (다른 유저가 편집했을 때) ===
+              case "docEdited":
+                // 다른 유저가 편집한 내용 수신
+                if (data.docId === currentDoc?.docId) {
+                  addChannelLog(
+                    `✏️ ${data.email || "다른 유저"}님이 문서를 편집했습니다.`,
+                  );
+                  // CRDT 로그 기반으로 로컬 콘텐츠 업데이트
+                  // 현재는 단순 덮어쓰기, 추후 CRDT 병합 로직 구현
+                  if (data.operation) {
+                    // operation 타입에 따라 처리
+                    const op = data.operation;
+                    if (op.type === "insert" && op.position !== undefined) {
+                      setDocContent((prev) => {
+                        const pos = Math.min(op.position, prev.length);
+                        return (
+                          prev.slice(0, pos) + (op.text || "") + prev.slice(pos)
+                        );
+                      });
+                    } else if (
+                      op.type === "delete" &&
+                      op.position !== undefined
+                    ) {
+                      setDocContent((prev) => {
+                        const pos = Math.min(op.position, prev.length);
+                        const len = op.length || 1;
+                        return prev.slice(0, pos) + prev.slice(pos + len);
+                      });
+                    }
+                  }
+                  // 버전 업데이트
+                  if (data.newVersion) {
+                    setLocalVersion(data.newVersion);
+                  }
+                }
+                break;
+
+              // === 브로드캐스트 이벤트: 문서 상태 변경 ===
+              case "docStatusChanged":
+                addChannelLog(
+                  `🔒 문서 상태 변경: ${data.statusText || data.status}`,
+                );
+                if (data.docId === currentDoc?.docId) {
+                  setDocStatus(data.status);
+                  if (data.message) {
+                    showToast(data.message, 3000);
+                  }
+                }
+                // 문서 목록에서도 상태 업데이트
+                setDocuments((prev) =>
+                  prev.map((d) =>
+                    d.docId === data.docId ? { ...d, status: data.status } : d,
+                  ),
+                );
+                break;
+
+              // === 브로드캐스트 이벤트: 문서 동기화 완료 ===
+              case "docSynced":
+                addChannelLog(`🔄 문서 동기화 시작: ${data.docId}`);
+                break;
+
+              case "docSyncCompleted":
+                addChannelLog(`✅ 문서 동기화 완료 (v${data.snapshotVersion})`);
+                if (data.docId === currentDoc?.docId) {
+                  setLocalVersion(data.snapshotVersion);
+                  setDocStatus(DOC_STATUS.NORMAL);
+                }
+                showToast("📥 문서가 동기화되었습니다.", 2000);
+                break;
+
+              // === 브로드캐스트 이벤트: 스냅샷 생성 완료 ===
+              case "docSnapshotCreated":
+                addChannelLog(`📸 스냅샷 생성 시작: ${data.docId}`);
+                break;
+
+              case "docSnapshotCompleted":
+                addChannelLog(`✅ 스냅샷 생성 완료 (v${data.snapshotVersion})`);
+                if (data.docId === currentDoc?.docId) {
+                  setLocalVersion(data.snapshotVersion);
+                  setDocStatus(DOC_STATUS.NORMAL);
+                  // 스냅샷 후 콘텐츠가 변경되었을 수 있으므로 업데이트
+                  if (data.content !== undefined) {
+                    setDocContent(data.content);
+                  }
+                }
+                showToast("📸 스냅샷이 생성되었습니다.", 2000);
+                break;
+
+              // === 문서 상태 조회 응답 ===
+              case "docStatus":
+                addChannelLog(
+                  `📊 문서 상태: ${data.statusText} (v${data.snapshotVersion})`,
+                );
+                if (data.docId === currentDoc?.docId) {
+                  setDocStatus(data.status);
+                  setLocalVersion(data.snapshotVersion);
+                }
+                break;
+
+              // === 문서 편집 성공 응답 ===
+              case "docEditSuccess":
+                // 내 편집이 성공적으로 적용됨
+                if (data.newVersion) {
+                  setLocalVersion(data.newVersion);
+                }
                 break;
 
               default:
@@ -912,6 +1059,11 @@ export default function Home() {
 
   // 채널 나가기 (목록으로 돌아가기)
   const leaveChannel = () => {
+    // 문서가 열려있으면 먼저 닫기
+    if (currentDoc) {
+      closeDocument();
+    }
+
     // 서버에 채널 퇴장 알림
     if (wsRef.current?.readyState === WebSocket.OPEN && currentChannel) {
       wsRef.current.send(
@@ -937,6 +1089,12 @@ export default function Home() {
     setChannelLogs([]);
     setDragItem(null);
     setDropTarget(null);
+    // 문서 관련 상태 초기화
+    setCurrentDoc(null);
+    setDocContent("");
+    setDocStatus(DOC_STATUS.NORMAL);
+    setDocViewers([]);
+    setLocalVersion("1.0.0");
   };
 
   // 폴더 토글
@@ -1284,6 +1442,195 @@ export default function Home() {
     addLog(`폴더 삭제 요청: ${folderPath} (${docsToDelete.length}개 문서)`);
   };
 
+  // 문서 열람 시작
+  const openDocument = (doc: Document) => {
+    if (!currentChannel) return;
+
+    setIsDocLoading(true);
+    setCurrentDoc(doc);
+    setDocContent("");
+    setDocStatus(DOC_STATUS.NORMAL);
+    setLocalVersion(doc.snapshotVersion || "1.0.0");
+
+    if (wsRef.current?.readyState === WebSocket.OPEN) {
+      wsRef.current.send(
+        JSON.stringify({
+          event: "enterDoc",
+          data: {
+            time: Date.now(),
+            channelId: currentChannel.channelId,
+            docId: doc.docId,
+          },
+        }),
+      );
+      addLog(`문서 열람 시작: ${doc.name}`);
+      addChannelLog(`📖 문서 열람 시작: ${doc.name}`);
+    }
+  };
+
+  // 문서 열람 종료
+  const closeDocument = () => {
+    if (!currentDoc) return;
+
+    if (wsRef.current?.readyState === WebSocket.OPEN) {
+      wsRef.current.send(
+        JSON.stringify({
+          event: "leaveDoc",
+          data: {
+            time: Date.now(),
+            docId: currentDoc.docId,
+          },
+        }),
+      );
+      addLog(`문서 열람 종료: ${currentDoc.name}`);
+      addChannelLog(`📕 문서 열람 종료: ${currentDoc.name}`);
+    }
+
+    setCurrentDoc(null);
+    setDocContent("");
+    setDocStatus(DOC_STATUS.NORMAL);
+    setDocViewers([]);
+    setLocalVersion("1.0.0");
+  };
+
+  // 문서 편집 (CRDT 로그 전송)
+  const editDocument = (operation: {
+    type: "insert" | "delete";
+    position: number;
+    text?: string;
+    length?: number;
+  }) => {
+    if (!currentDoc || !currentChannel) return;
+
+    // 문서가 잠금 상태면 편집 불가
+    if (docStatus === DOC_STATUS.LOCKED) {
+      showToast("⚠️ 문서가 잠금 상태입니다. 잠시 후 다시 시도해주세요.", 3000);
+      return;
+    }
+
+    if (wsRef.current?.readyState === WebSocket.OPEN) {
+      wsRef.current.send(
+        JSON.stringify({
+          event: "editDoc",
+          data: {
+            time: Date.now(),
+            docId: currentDoc.docId,
+            operation,
+          },
+        }),
+      );
+    }
+  };
+
+  // 문서 동기화 요청 (오너만)
+  const syncDocument = () => {
+    if (!currentDoc || !currentChannel) return;
+
+    // 권한 확인 (오너만)
+    if (currentChannel.myPermission !== 0) {
+      showToast("⚠️ 동기화 권한이 없습니다.", 3000);
+      return;
+    }
+
+    if (wsRef.current?.readyState === WebSocket.OPEN) {
+      wsRef.current.send(
+        JSON.stringify({
+          event: "syncDoc",
+          data: {
+            time: Date.now(),
+            channelId: currentChannel.channelId,
+            docId: currentDoc.docId,
+          },
+        }),
+      );
+      addLog(`문서 동기화 요청: ${currentDoc.name}`);
+      addChannelLog(`🔄 동기화 요청: ${currentDoc.name}`);
+    }
+  };
+
+  // 스냅샷 생성 요청 (오너만)
+  const createSnapshot = () => {
+    if (!currentDoc || !currentChannel) return;
+
+    // 권한 확인 (오너만)
+    if (currentChannel.myPermission !== 0) {
+      showToast("⚠️ 스냅샷 생성 권한이 없습니다.", 3000);
+      return;
+    }
+
+    if (wsRef.current?.readyState === WebSocket.OPEN) {
+      wsRef.current.send(
+        JSON.stringify({
+          event: "snapshotDoc",
+          data: {
+            time: Date.now(),
+            channelId: currentChannel.channelId,
+            docId: currentDoc.docId,
+          },
+        }),
+      );
+      addLog(`스냅샷 생성 요청: ${currentDoc.name}`);
+      addChannelLog(`📸 스냅샷 생성 요청: ${currentDoc.name}`);
+    }
+  };
+
+  // 문서 상태 조회
+  const getDocStatus = () => {
+    if (!currentDoc) return;
+
+    if (wsRef.current?.readyState === WebSocket.OPEN) {
+      wsRef.current.send(
+        JSON.stringify({
+          event: "getDocStatus",
+          data: {
+            time: Date.now(),
+            docId: currentDoc.docId,
+          },
+        }),
+      );
+    }
+  };
+
+  // 텍스트 입력 처리 (편집)
+  const handleTextChange = (e: React.ChangeEvent<HTMLTextAreaElement>) => {
+    const newValue = e.target.value;
+    const oldValue = docContent;
+
+    // 간단한 diff 계산 (삽입/삭제 감지)
+    if (newValue.length > oldValue.length) {
+      // 삽입
+      const diffLen = newValue.length - oldValue.length;
+      // 삽입 위치 찾기
+      let pos = 0;
+      while (pos < oldValue.length && oldValue[pos] === newValue[pos]) {
+        pos++;
+      }
+      const insertedText = newValue.slice(pos, pos + diffLen);
+
+      editDocument({
+        type: "insert",
+        position: pos,
+        text: insertedText,
+      });
+    } else if (newValue.length < oldValue.length) {
+      // 삭제
+      const diffLen = oldValue.length - newValue.length;
+      // 삭제 위치 찾기
+      let pos = 0;
+      while (pos < newValue.length && oldValue[pos] === newValue[pos]) {
+        pos++;
+      }
+
+      editDocument({
+        type: "delete",
+        position: pos,
+        length: diffLen,
+      });
+    }
+
+    setDocContent(newValue);
+  };
+
   // 트리 노드 렌더링 (드래그앤드랍 지원)
   const renderTreeNode = (
     node: TreeNode,
@@ -1336,9 +1683,14 @@ export default function Home() {
       <div
         key={node.path}
         className={`flex items-center py-1 px-2 cursor-pointer select-none group transition-colors ${
-          isDragging ? "opacity-50 bg-gray-600" : "hover:bg-gray-700"
+          isDragging
+            ? "opacity-50 bg-gray-600"
+            : currentDoc?.docId === node.doc?.docId
+              ? "bg-blue-600/30 border-l-2 border-blue-500"
+              : "hover:bg-gray-700"
         }`}
         style={{ paddingLeft: `${paddingLeft + 20}px` }}
+        onClick={() => node.doc && openDocument(node.doc)}
         onContextMenu={(e) =>
           handleContextMenu(e, node.path, node.depth, false, node.doc)
         }
@@ -1346,10 +1698,15 @@ export default function Home() {
         onDragStart={(e) => handleDragStart(e, "document", node.path, node.doc)}
         onDragEnd={handleDragEnd}
       >
-        <span className="mr-1">📄</span>
+        <span className="mr-1">
+          {node.doc?.status === DOC_STATUS.LOCKED ? "🔒" : "📄"}
+        </span>
         <span className="text-sm text-gray-300 truncate flex-1">
           {node.name}
         </span>
+        {currentDoc?.docId === node.doc?.docId && (
+          <span className="text-xs text-blue-400">●</span>
+        )}
       </div>
     );
   };
@@ -1988,14 +2345,165 @@ export default function Home() {
               </p>
             </div>
           </div>
-        ) : (
+        ) : !currentDoc ? (
           <div className="flex-1 flex items-center justify-center">
             <div className="text-center text-gray-500">
-              <p className="text-lg">문서 편집 영역</p>
-              <p className="text-sm mt-2">좌측에서 문서를 선택하세요</p>
-              <p className="text-xs mt-4 text-gray-600">
-                (추후 편집기 구현 예정)
+              <p className="text-lg">문서를 선택하세요</p>
+              <p className="text-sm mt-2">
+                좌측에서 문서를 클릭하여 열람합니다
               </p>
+            </div>
+          </div>
+        ) : (
+          /* 문서 편집 영역 */
+          <div className="flex-1 flex flex-col h-full">
+            {/* 문서 헤더 */}
+            <div className="border-b border-gray-700 bg-gray-800 px-4 py-2">
+              <div className="flex items-center justify-between">
+                <div className="flex items-center gap-3">
+                  <button
+                    onClick={closeDocument}
+                    className="p-1 hover:bg-gray-700 rounded transition-colors"
+                    title="문서 닫기"
+                  >
+                    <svg
+                      className="w-5 h-5"
+                      fill="none"
+                      stroke="currentColor"
+                      viewBox="0 0 24 24"
+                    >
+                      <path
+                        strokeLinecap="round"
+                        strokeLinejoin="round"
+                        strokeWidth={2}
+                        d="M6 18L18 6M6 6l12 12"
+                      />
+                    </svg>
+                  </button>
+                  <div>
+                    <h2 className="font-semibold text-white flex items-center gap-2">
+                      {docStatus === DOC_STATUS.LOCKED && (
+                        <span className="text-yellow-500" title="잠금 상태">
+                          🔒
+                        </span>
+                      )}
+                      {currentDoc.name}
+                    </h2>
+                    <p className="text-xs text-gray-400">
+                      {currentDoc.dir}/{currentDoc.name} · v{localVersion}
+                    </p>
+                  </div>
+                </div>
+                <div className="flex items-center gap-2">
+                  {/* 열람 중인 유저 표시 */}
+                  {docViewers.length > 0 && (
+                    <div className="flex items-center gap-1 text-xs text-gray-400">
+                      <span>👥</span>
+                      <span>{docViewers.length}명 열람 중</span>
+                    </div>
+                  )}
+                  {/* 상태 표시 */}
+                  <span
+                    className={`text-xs px-2 py-1 rounded ${
+                      docStatus === DOC_STATUS.NORMAL
+                        ? "bg-green-600/30 text-green-400"
+                        : docStatus === DOC_STATUS.LOCKED
+                          ? "bg-yellow-600/30 text-yellow-400"
+                          : "bg-red-600/30 text-red-400"
+                    }`}
+                  >
+                    {docStatus === DOC_STATUS.NORMAL
+                      ? "편집 가능"
+                      : docStatus === DOC_STATUS.LOCKED
+                        ? "잠금"
+                        : "삭제됨"}
+                  </span>
+                  {/* 오너 전용 버튼 */}
+                  {currentChannel.myPermission === 0 && (
+                    <>
+                      <button
+                        onClick={syncDocument}
+                        disabled={docStatus === DOC_STATUS.LOCKED}
+                        className="px-3 py-1 text-xs bg-blue-600 hover:bg-blue-700 disabled:bg-gray-600 disabled:cursor-not-allowed rounded transition-colors"
+                        title="Redis → Supabase 동기화"
+                      >
+                        🔄 동기화
+                      </button>
+                      <button
+                        onClick={createSnapshot}
+                        disabled={docStatus === DOC_STATUS.LOCKED}
+                        className="px-3 py-1 text-xs bg-purple-600 hover:bg-purple-700 disabled:bg-gray-600 disabled:cursor-not-allowed rounded transition-colors"
+                        title="스냅샷 생성 (로그 초기화)"
+                      >
+                        📸 스냅샷
+                      </button>
+                    </>
+                  )}
+                </div>
+              </div>
+            </div>
+
+            {/* 에디터 영역 */}
+            <div className="flex-1 p-4 overflow-hidden">
+              {isDocLoading ? (
+                <div className="flex items-center justify-center h-full">
+                  <div className="text-gray-400 flex items-center gap-2">
+                    <svg
+                      className="animate-spin w-5 h-5"
+                      fill="none"
+                      viewBox="0 0 24 24"
+                    >
+                      <circle
+                        className="opacity-25"
+                        cx="12"
+                        cy="12"
+                        r="10"
+                        stroke="currentColor"
+                        strokeWidth="4"
+                      />
+                      <path
+                        className="opacity-75"
+                        fill="currentColor"
+                        d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"
+                      />
+                    </svg>
+                    <span>문서 로딩 중...</span>
+                  </div>
+                </div>
+              ) : (
+                <textarea
+                  value={docContent}
+                  onChange={handleTextChange}
+                  disabled={docStatus !== DOC_STATUS.NORMAL}
+                  placeholder="문서 내용을 입력하세요..."
+                  className={`w-full h-full resize-none bg-gray-900 text-gray-100 p-4 rounded-lg border focus:outline-none focus:ring-2 focus:ring-blue-500 font-mono text-sm ${
+                    docStatus === DOC_STATUS.NORMAL
+                      ? "border-gray-700"
+                      : "border-yellow-600/50 bg-gray-900/50 cursor-not-allowed"
+                  }`}
+                  style={{ minHeight: "300px" }}
+                />
+              )}
+            </div>
+
+            {/* 상태 바 */}
+            <div className="border-t border-gray-700 bg-gray-800 px-4 py-1 text-xs text-gray-400 flex items-center justify-between">
+              <div className="flex items-center gap-4">
+                <span>문자 수: {docContent.length.toLocaleString()}</span>
+                <span>
+                  줄 수: {docContent.split("\n").length.toLocaleString()}
+                </span>
+              </div>
+              <div className="flex items-center gap-4">
+                <span>버전: {localVersion}</span>
+                <button
+                  onClick={getDocStatus}
+                  className="hover:text-white transition-colors"
+                  title="상태 새로고침"
+                >
+                  🔄
+                </button>
+              </div>
             </div>
           </div>
         )}
