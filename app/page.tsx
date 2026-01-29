@@ -1269,14 +1269,21 @@ export default function Home() {
     const itemName = dragItem.path.split("/").pop() || "";
 
     // 대상 폴더의 parentId와 depth 계산
-    // targetPath 예: "root" → parentId: null, depth: 1
+    // targetPath 예: "root" → parentId: root의 .option docId, depth: 1
     // targetPath 예: "root/pathA" → parentId: pathA의 .option docId, depth: 2
     const pathParts = targetPath.split("/").filter((p) => p.length > 0);
     const newDepth = pathParts.length; // root→1, root/A→2
 
     // 대상 폴더의 .option docId 찾기
     let newParentId: string | null = null;
-    if (targetPath !== "root") {
+    if (targetPath === "root") {
+      // root로 이동 시 root의 .option docId 찾기
+      const rootOptionDoc = documents.find(
+        (doc) =>
+          doc.name === ".option" && doc.dir === "root" && doc.depth === 0,
+      );
+      newParentId = rootOptionDoc?.docId || null;
+    } else {
       const targetFolderName = pathParts[pathParts.length - 1];
       const targetFolderDoc = documents.find(
         (doc) =>
@@ -2011,9 +2018,23 @@ export default function Home() {
             {/* 문서 트리 */}
             <div
               className="flex-1 overflow-y-auto"
-              onContextMenu={(e) =>
-                handleContextMenu(e, "root", 0, true, undefined, null)
-              }
+              onContextMenu={(e) => {
+                // root의 .option docId 찾기 (depth=0, dir="root", name=".option")
+                const rootOptionDoc = documents.find(
+                  (doc) =>
+                    doc.name === ".option" &&
+                    doc.dir === "root" &&
+                    doc.depth === 0,
+                );
+                handleContextMenu(
+                  e,
+                  "root",
+                  0,
+                  true,
+                  undefined,
+                  rootOptionDoc?.docId || null,
+                );
+              }}
               onDragOver={(e) => handleDragOver(e, "root")}
               onDragLeave={handleDragLeave}
               onDrop={(e) => handleDrop(e, "root")}
