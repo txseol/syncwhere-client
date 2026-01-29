@@ -33,7 +33,6 @@ interface Document {
   dir: string;
   depth: number;
   createdAt: string;
-  isDirectory?: boolean; // true: 폴더, false/undefined: 파일
   status?: number; // 0: 정상, 1: 삭제됨, 2: 잠금
   content?: string;
 }
@@ -255,24 +254,23 @@ export default function Home() {
     sortedDepths.forEach((depth) => {
       const docsAtDepth = docsByDepth.get(depth) || [];
 
-      // isDirectory가 true인 항목을 폴더로 처리
+      // .option 파일을 폴더로 처리 (name=".option"이면 dir이 폴더명)
       docsAtDepth.forEach((doc) => {
-        if (doc.isDirectory) {
-          // 폴더 노드 생성
-          const folderName = doc.name;
+        if (doc.name === ".option") {
+          // 폴더 노드 생성 - doc.dir이 폴더명
+          const folderName = doc.dir;
 
-          // 상위 폴더 찾기
+          // depth 0이면 root 아래에 폴더가 있음
+          // depth 1 이상이면 상위 폴더 찾기 필요
           let parentNode: TreeNode | undefined;
-          if (doc.dir === "root") {
+          if (depth === 0) {
+            // root 아래에 폴더 생성
             parentNode = root;
           } else {
-            // doc.dir과 일치하는 이름의 폴더 찾기 (depth - 1인 폴더)
+            // depth - 1인 폴더 중에서 부모 찾기
+            // 상위 폴더를 찾는 로직: 동일 depth의 다른 문서들의 dir을 참고
             folderMap.forEach((node) => {
-              if (
-                node.name === doc.dir &&
-                node.depth === depth - 1 &&
-                node.isFolder
-              ) {
+              if (node.depth === depth - 1 && node.isFolder) {
                 parentNode = node;
               }
             });
@@ -293,7 +291,7 @@ export default function Home() {
               depth: depth,
               isFolder: true,
               children: [],
-              doc: doc,
+              doc: doc, // .option 문서 참조 저장
             };
             folderMap.set(folderPath, folderNode);
             parentNode.children.push(folderNode);
@@ -301,9 +299,9 @@ export default function Home() {
         }
       });
 
-      // 일반 문서 추가 (isDirectory가 false 또는 undefined인 경우)
+      // 일반 문서 추가 (.option이 아닌 경우)
       docsAtDepth.forEach((doc) => {
-        if (doc.isDirectory) return; // 폴더는 위에서 처리함
+        if (doc.name === ".option") return; // 폴더 마커는 위에서 처리함
 
         // 상위 폴더 찾기
         let parentNode: TreeNode | undefined;
@@ -549,13 +547,19 @@ export default function Home() {
                 break;
               case "docCreated":
                 addLog(`문서 생성됨: ${data.docName || data.document?.name}`);
+                // .option 파일이면 폴더 생성 (dir이 폴더명)
+                const isFolder = data.docName === ".option";
                 addChannelLog(
-                  `${data.isDirectory ? "📁 폴더" : "📄 문서"} 생성됨: ${data.docName || data.document?.name}`,
+                  `${isFolder ? `📁 폴더 생성됨: ${data.dir}` : `📄 문서 생성됨: ${data.docName || data.document?.name}`}`,
                 );
-                showToast(
-                  `✅ "${data.docName || data.document?.name}" 생성됨`,
-                  3000,
-                );
+                if (!isFolder) {
+                  showToast(
+                    `✅ "${data.docName || data.document?.name}" 생성됨`,
+                    3000,
+                  );
+                } else {
+                  showToast(`✅ 폴더 "${data.dir}" 생성됨`, 3000);
+                }
                 // 문서 목록에 추가 (서버 응답 형식에 맞게 처리)
                 if (data.docId) {
                   const newDoc: Document = {
@@ -564,7 +568,6 @@ export default function Home() {
                     name: data.docName,
                     dir: data.dir,
                     depth: data.depth,
-                    isDirectory: data.isDirectory || false,
                     createdAt: new Date().toISOString(),
                   };
                   setDocuments((prev) => [...prev, newDoc]);
@@ -1177,7 +1180,7 @@ export default function Home() {
         addChannelLog(`📝 이름 변경: ${renameModal.oldName} → ${newName}`);
       }
     } else if (renameModal.type === "folder" && renameModal.doc) {
-      // 폴더 이름 변경 - isDirectory가 true인 문서의 이름 변경
+      // 폴더 이름 변경 - .option 파일의 dir(=폴더명)을 변경
       // 서버가 하위 항목들의 dir도 업데이트
       if (wsRef.current?.readyState === WebSocket.OPEN) {
         wsRef.current.send(
@@ -1187,7 +1190,7 @@ export default function Home() {
               time: Date.now(),
               channelId: currentChannel.channelId,
               docId: renameModal.doc.docId,
-              newName: newName.trim(), // 서버가 하위 항목들의 dir도 업데이트
+              newDir: newName.trim(), // 새 폴더명이 newDir로 전송
             },
           }),
         );
@@ -1264,8 +1267,10 @@ export default function Home() {
       // targetPath 예: "root" → newDir: "root", newDepth: 0
       // targetPath 예: "root/pathA" → newDir: "pathA", newDepth: 1
       const pathParts = targetPath.split("/").filter((p) => p.length > 0);
+      // root로 이동 시 dir="root", depth=0
+      // 폴더로 이동 시 dir=폴더명, depth=해당 폴더의 depth + 1 = pathParts.length
       const newDir = pathParts[pathParts.length - 1] || "root";
-      const newDepth = pathParts.length - 1; // root = depth 0
+      const newDepth = targetPath === "root" ? 0 : pathParts.length;
 
       if (wsRef.current?.readyState === WebSocket.OPEN) {
         wsRef.current.send(
@@ -1284,13 +1289,13 @@ export default function Home() {
         addChannelLog(`📄 문서 이동: ${itemName} → ${targetPath}`);
       }
     } else if (dragItem.type === "folder" && dragItem.doc) {
-      // 폴더 이동 - isDirectory가 true인 문서 이동 (서버가 하위 항목들도 처리)
-      const folderName = dragItem.doc.name;
-      // targetPath 예: "root" → newDir: "root", newDepth: 0
-      // targetPath 예: "root/pathA" → newDir: "pathA", newDepth: 1
+      // 폴더 이동 - .option 파일의 depth만 변경 (dir=폴더명은 유지)
+      // 서버가 하위 항목들의 depth도 업데이트
+      const folderName = dragItem.doc.dir; // .option 파일의 dir이 폴더명
+      // targetPath 예: "root" → newDepth: 1 (root 아래에 폴더)
+      // targetPath 예: "root/pathA" → newDepth: 2 (pathA 아래에 폴더)
       const pathParts = targetPath.split("/").filter((p) => p.length > 0);
-      const newDir = pathParts[pathParts.length - 1] || "root";
-      const newDepth = pathParts.length - 1; // root = depth 0
+      const newDepth = pathParts.length; // 대상 폴더의 하위이므로 +1이 아닌 그냥 length
 
       if (wsRef.current?.readyState === WebSocket.OPEN) {
         wsRef.current.send(
@@ -1300,8 +1305,7 @@ export default function Home() {
               time: Date.now(),
               channelId: currentChannel.channelId,
               docId: dragItem.doc.docId,
-              newDir: newDir,
-              newDepth: newDepth,
+              newDepth: newDepth, // depth만 변경
             },
           }),
         );
@@ -1319,9 +1323,10 @@ export default function Home() {
   const createFolder = () => {
     if (!createModal || !currentChannel || !newItemName.trim()) return;
 
-    // 폴더 생성: isDirectory: true로 폴더 표시
-    // parentDir은 전체 경로 (서버가 depth와 dir 계산)
-    const parentDir = createModal.dir === "root" ? "root" : createModal.dir;
+    // 폴더 생성: {docName: ".option", dir: "폴더명", depth: n}
+    // createModal.depth는 부모의 depth이므로 +1
+    const folderDepth = createModal.depth + 1;
+    const folderName = newItemName.trim();
 
     if (wsRef.current?.readyState === WebSocket.OPEN) {
       wsRef.current.send(
@@ -1330,13 +1335,13 @@ export default function Home() {
           data: {
             time: Date.now(),
             channelId: currentChannel.channelId,
-            docName: newItemName.trim(), // 폴더명
-            parentDir: parentDir, // 서버가 이 경로에서 depth와 dir 계산
-            isDirectory: true, // 폴더로 표시
+            docName: ".option", // 폴더 마커
+            dir: folderName, // 폴더명이 dir에 들어감
+            depth: folderDepth,
           },
         }),
       );
-      addLog(`폴더 생성 요청: ${parentDir}/${newItemName.trim()}`);
+      addLog(`폴더 생성 요청: ${folderName} (depth: ${folderDepth})`);
     }
 
     setCreateModal(null);
@@ -1347,8 +1352,11 @@ export default function Home() {
   const createDocument = () => {
     if (!createModal || !currentChannel || !newItemName.trim()) return;
 
-    // parentDir은 전체 경로 (서버가 depth와 dir 계산)
-    const parentDir = createModal.dir === "root" ? "root" : createModal.dir;
+    // 문서 생성: {docName: "파일명", dir: "상위폴더명", depth: n}
+    // createModal.depth는 부모의 depth이므로 +1 (단, root는 depth -1이므로 특별 처리)
+    const docDepth = createModal.depth + 1;
+    // dir은 상위 폴더명 (root의 경우 "root")
+    const parentDir = createModal.dir.split("/").pop() || "root";
 
     if (wsRef.current?.readyState === WebSocket.OPEN) {
       wsRef.current.send(
@@ -1358,7 +1366,8 @@ export default function Home() {
             time: Date.now(),
             channelId: currentChannel.channelId,
             docName: newItemName.trim(),
-            parentDir: parentDir, // 서버가 이 경로에서 depth와 dir을 계산
+            dir: parentDir,
+            depth: docDepth,
           },
         }),
       );
@@ -1388,13 +1397,20 @@ export default function Home() {
     }
   };
 
-  // 폴더 삭제 (하위 모든 문서 삭제)
+  // 폴더 삭제 (해당 폴더의 .option 파일과 하위 모든 문서 삭제)
   const deleteFolder = (folderPath: string) => {
     if (!currentChannel) return;
 
-    // 해당 폴더와 하위의 모든 문서 찾기
+    // 폴더명 추출 (경로의 마지막 부분)
+    const folderName = folderPath.split("/").pop() || "";
+
+    // 해당 폴더의 .option 파일과 해당 폴더를 dir로 가진 모든 문서 찾기
     const docsToDelete = documents.filter(
-      (doc) => doc.dir === folderPath || doc.dir.startsWith(`${folderPath}/`),
+      (doc) =>
+        // .option 파일이고 dir이 폴더명인 경우 (폴더 자체)
+        (doc.name === ".option" && doc.dir === folderName) ||
+        // dir이 폴더명인 일반 문서
+        doc.dir === folderName,
     );
 
     docsToDelete.forEach((doc) => {
@@ -1412,7 +1428,7 @@ export default function Home() {
       }
     });
 
-    addLog(`폴더 삭제 요청: ${folderPath} (${docsToDelete.length}개 문서)`);
+    addLog(`폴더 삭제 요청: ${folderName} (${docsToDelete.length}개 문서)`);
   };
 
   // 문서 열람 시작 (읽기 전용)
