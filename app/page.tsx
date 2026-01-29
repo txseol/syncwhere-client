@@ -32,6 +32,7 @@ interface Document {
   name: string;
   dir: string;
   depth: number;
+  parentId: string | null; // 부모 폴더(.option)의 docId, root면 null
   createdAt: string;
   status?: number; // 0: 정상, 1: 삭제됨, 2: 잠금
   content?: string;
@@ -117,6 +118,7 @@ export default function Home() {
     targetDepth: number;
     isFolder: boolean;
     doc?: Document;
+    parentId: string | null; // 부모 폴더의 .option docId (root면 null)
   } | null>(null);
 
   // 새 항목 생성 모달
@@ -124,6 +126,7 @@ export default function Home() {
     type: "folder" | "document";
     dir: string;
     depth: number;
+    parentId: string | null; // 부모 폴더의 .option docId (root면 null)
   } | null>(null);
   const [newItemName, setNewItemName] = useState("");
 
@@ -224,136 +227,87 @@ export default function Home() {
     console.log("[Home] 로그아웃 완료");
   };
 
-  // 문서의 전체 경로 계산 (서버의 dir은 직속 상위 디렉토리명만)
-  // depth를 기반으로 트리 구조를 재구성
+  // 문서의 전체 경로 계산 - parentId 기반으로 트리 구조를 재구성
   const buildDocumentTree = useCallback((docs: Document[]): TreeNode => {
     const root: TreeNode = {
       name: "root",
       path: "root",
-      depth: -1, // root 자체는 depth -1 (root 안의 항목이 depth 0)
+      depth: 0, // root 자체는 depth 0
       isFolder: true,
       children: [],
     };
 
-    const folderMap = new Map<string, TreeNode>();
-    folderMap.set("root", root);
+    // docId로 폴더 노드 매핑 (parentId 참조용)
+    const folderByDocId = new Map<string, TreeNode>();
+    // path로 폴더 노드 매핑 (경로 생성용)
+    const folderByPath = new Map<string, TreeNode>();
+    folderByPath.set("root", root);
 
-    // depth별로 문서 그룹화 (낮은 depth부터 처리)
-    const docsByDepth = new Map<number, Document[]>();
-    docs.forEach((doc) => {
-      if (!docsByDepth.has(doc.depth)) {
-        docsByDepth.set(doc.depth, []);
+    // 1단계: 모든 폴더(.option) 노드 생성 (depth 순서대로)
+    const folders = docs
+      .filter((doc) => doc.name === ".option")
+      .sort((a, b) => a.depth - b.depth);
+
+    folders.forEach((doc) => {
+      // depth=0이고 dir="root"인 경우는 root 폴더 자체이므로 스킵
+      if (doc.depth === 0 && doc.dir === "root") {
+        // root의 .option은 docId만 매핑 (자식들이 parentId로 참조할 수 있도록)
+        folderByDocId.set(doc.docId, root);
+        return;
       }
-      docsByDepth.get(doc.depth)!.push(doc);
+
+      // 부모 노드 찾기 (parentId 기반)
+      let parentNode: TreeNode;
+      if (doc.parentId === null) {
+        parentNode = root;
+      } else {
+        parentNode = folderByDocId.get(doc.parentId) || root;
+      }
+
+      const folderName = doc.dir;
+      const folderPath =
+        parentNode === root
+          ? `root/${folderName}`
+          : `${parentNode.path}/${folderName}`;
+
+      const folderNode: TreeNode = {
+        name: folderName,
+        path: folderPath,
+        depth: doc.depth,
+        isFolder: true,
+        children: [],
+        doc: doc,
+      };
+
+      folderByDocId.set(doc.docId, folderNode);
+      folderByPath.set(folderPath, folderNode);
+      parentNode.children.push(folderNode);
     });
 
-    // depth 순서대로 정렬
-    const sortedDepths = Array.from(docsByDepth.keys()).sort((a, b) => a - b);
+    // 2단계: 일반 문서 추가 (.option이 아닌 경우)
+    const documents = docs.filter((doc) => doc.name !== ".option");
 
-    // depth별로 폴더와 문서 처리
-    sortedDepths.forEach((depth) => {
-      const docsAtDepth = docsByDepth.get(depth) || [];
+    documents.forEach((doc) => {
+      // 부모 노드 찾기 (parentId 기반)
+      let parentNode: TreeNode;
+      if (doc.parentId === null) {
+        parentNode = root;
+      } else {
+        parentNode = folderByDocId.get(doc.parentId) || root;
+      }
 
-      // .option 파일을 폴더로 처리 (name=".option"이면 dir이 폴더명)
-      docsAtDepth.forEach((doc) => {
-        if (doc.name === ".option") {
-          // depth=0이고 dir="root"인 경우는 root 폴더 자체이므로 표시하지 않음
-          if (depth === 0 && doc.dir === "root") {
-            return; // root 폴더는 스킵
-          }
+      const docPath =
+        parentNode === root
+          ? `root/${doc.name}`
+          : `${parentNode.path}/${doc.name}`;
 
-          // 폴더 노드 생성 - doc.dir이 폴더명
-          const folderName = doc.dir;
-
-          // depth 0이면 root 아래에 폴더가 있음 (root 폴더 자체 제외)
-          // depth 1 이상이면 상위 폴더 찾기 필요
-          let parentNode: TreeNode | undefined;
-          if (depth === 0) {
-            // root 아래에 폴더 생성 (depth 0인 일반 폴더)
-            parentNode = root;
-          } else if (depth === 1) {
-            // depth 1인 폴더는 root 아래에 있음
-            parentNode = root;
-          } else {
-            // depth 2 이상인 경우 상위 폴더 찾기
-            folderMap.forEach((node) => {
-              if (node.depth === depth - 1 && node.isFolder) {
-                parentNode = node;
-              }
-            });
-            // parentNode를 찾지 못한 경우 root에 추가
-            if (!parentNode) parentNode = root;
-          }
-
-          // 폴더 노드 생성
-          const folderPath =
-            parentNode === root
-              ? `root/${folderName}`
-              : `${parentNode.path}/${folderName}`;
-
-          if (!folderMap.has(folderPath)) {
-            const folderNode: TreeNode = {
-              name: folderName,
-              path: folderPath,
-              depth: depth,
-              isFolder: true,
-              children: [],
-              doc: doc, // .option 문서 참조 저장
-            };
-            folderMap.set(folderPath, folderNode);
-            parentNode.children.push(folderNode);
-          }
-        }
-      });
-
-      // 일반 문서 추가 (.option이 아닌 경우)
-      docsAtDepth.forEach((doc) => {
-        if (doc.name === ".option") return; // 폴더 마커는 위에서 처리함
-
-        // 상위 폴더 찾기
-        let parentNode: TreeNode | undefined;
-        if (doc.dir === "root") {
-          parentNode = root;
-        } else {
-          // doc.dir과 일치하는 이름의 폴더 찾기 (depth - 1인 폴더의 자식 중)
-          folderMap.forEach((node) => {
-            if (
-              node.name === doc.dir &&
-              node.depth === depth - 1 &&
-              node.isFolder
-            ) {
-              parentNode = node;
-            }
-          });
-          // 부모를 찾지 못한 경우, 같은 depth-1에서 폴더 검색
-          if (!parentNode) {
-            folderMap.forEach((node) => {
-              const childFolder = node.children.find(
-                (c) =>
-                  c.name === doc.dir && c.isFolder && c.depth === depth - 1,
-              );
-              if (childFolder) {
-                parentNode = childFolder as TreeNode;
-              }
-            });
-          }
-          // 여전히 찾지 못한 경우 root에 추가
-          if (!parentNode) parentNode = root;
-        }
-
-        const docPath =
-          parentNode === root
-            ? `root/${doc.name}`
-            : `${parentNode.path}/${doc.name}`;
-
-        parentNode.children.push({
-          name: doc.name,
-          path: docPath,
-          depth: doc.depth,
-          isFolder: false,
-          children: [],
-          doc: doc,
-        });
+      parentNode.children.push({
+        name: doc.name,
+        path: docPath,
+        depth: doc.depth,
+        isFolder: false,
+        children: [],
+        doc: doc,
       });
     });
 
@@ -578,6 +532,7 @@ export default function Home() {
                     name: data.docName,
                     dir: data.dir,
                     depth: data.depth,
+                    parentId: data.parentId || null, // parentId 추가
                     createdAt: new Date().toISOString(),
                   };
                   setDocuments((prev) => [...prev, newDoc]);
@@ -701,15 +656,19 @@ export default function Home() {
                 addChannelLog(
                   `📝 문서 수정됨: ${data.oldName} → ${data.newName}`,
                 );
-                // 문서 목록 갱신
+                // 문서 목록 갱신 (parentId 기반)
                 setDocuments((prev) =>
                   prev.map((d) =>
                     d.docId === data.docId
                       ? {
                           ...d,
-                          name: data.newName,
-                          dir: data.newDir,
-                          depth: data.newDepth,
+                          name: data.newName ?? d.name,
+                          dir: data.newDir ?? d.dir,
+                          depth: data.newDepth ?? d.depth,
+                          parentId:
+                            data.newParentId !== undefined
+                              ? data.newParentId
+                              : d.parentId,
                         }
                       : d,
                   ),
@@ -723,9 +682,13 @@ export default function Home() {
                     d.docId === data.docId
                       ? {
                           ...d,
-                          name: data.newName,
-                          dir: data.newDir,
-                          depth: data.newDepth,
+                          name: data.newName ?? d.name,
+                          dir: data.newDir ?? d.dir,
+                          depth: data.newDepth ?? d.depth,
+                          parentId:
+                            data.newParentId !== undefined
+                              ? data.newParentId
+                              : d.parentId,
                         }
                       : d,
                   ),
@@ -1151,6 +1114,7 @@ export default function Home() {
     targetDepth: number,
     isFolder: boolean = true,
     doc?: Document,
+    parentId: string | null = null, // 부모 폴더의 .option docId
   ) => {
     e.preventDefault();
     e.stopPropagation();
@@ -1161,6 +1125,7 @@ export default function Home() {
       targetDepth,
       isFolder,
       doc,
+      parentId,
     });
   };
 
@@ -1170,13 +1135,14 @@ export default function Home() {
   };
 
   // 생성 모달 열기
-  // dir은 전체 경로(parentDir)로 사용, depth는 UI 표시용
+  // parentId 기반으로 부모 폴더 지정
   const openCreateModal = (type: "folder" | "document") => {
     if (!contextMenu) return;
     setCreateModal({
       type,
-      dir: contextMenu.targetPath, // 전체 경로 (parentDir로 서버에 전송)
-      depth: contextMenu.targetDepth, // 부모의 depth (UI 표시용, 서버가 실제 값 계산)
+      dir: contextMenu.targetPath, // 전체 경로 (UI 표시용)
+      depth: contextMenu.targetDepth, // 부모의 depth
+      parentId: contextMenu.parentId, // 부모 폴더의 .option docId (root면 null)
     });
     setNewItemName("");
     setContextMenu(null);
@@ -1203,7 +1169,7 @@ export default function Home() {
     if (!renameModal || !currentChannel || !newName.trim()) return;
 
     if (renameModal.type === "document" && renameModal.doc) {
-      // 문서 이름 변경
+      // 문서 이름 변경 - newName만 전송
       if (wsRef.current?.readyState === WebSocket.OPEN) {
         wsRef.current.send(
           JSON.stringify({
@@ -1221,7 +1187,7 @@ export default function Home() {
       }
     } else if (renameModal.type === "folder" && renameModal.doc) {
       // 폴더 이름 변경 - .option 파일의 dir(=폴더명)을 변경
-      // 서버가 하위 항목들의 dir도 업데이트
+      // parentId 방식: 하위 항목들은 parentId로 연결되어 있으므로 업데이트 불필요!
       if (wsRef.current?.readyState === WebSocket.OPEN) {
         wsRef.current.send(
           JSON.stringify({
@@ -1230,7 +1196,7 @@ export default function Home() {
               time: Date.now(),
               channelId: currentChannel.channelId,
               docId: renameModal.doc.docId,
-              newDir: newName.trim(), // 새 폴더명이 newDir로 전송
+              newName: newName.trim(), // 폴더명 변경도 newName으로 통일
             },
           }),
         );
@@ -1302,16 +1268,27 @@ export default function Home() {
 
     const itemName = dragItem.path.split("/").pop() || "";
 
-    if (dragItem.type === "document" && dragItem.doc) {
-      // 문서 이동 - newDir, newDepth 직접 전송
-      // targetPath 예: "root" → newDir: "root", newDepth: 1
-      // targetPath 예: "root/pathA" → newDir: "pathA", newDepth: 2
-      const pathParts = targetPath.split("/").filter((p) => p.length > 0);
-      // root로 이동 시 dir="root", depth=1
-      // 폴더로 이동 시 dir=폴더명, depth=pathParts.length (root=1, root/A=2, root/A/B=3)
-      const newDir = pathParts[pathParts.length - 1] || "root";
-      const newDepth = pathParts.length; // root→1, root/A→2, root/A/B→3
+    // 대상 폴더의 parentId와 depth 계산
+    // targetPath 예: "root" → parentId: null, depth: 1
+    // targetPath 예: "root/pathA" → parentId: pathA의 .option docId, depth: 2
+    const pathParts = targetPath.split("/").filter((p) => p.length > 0);
+    const newDepth = pathParts.length; // root→1, root/A→2
 
+    // 대상 폴더의 .option docId 찾기
+    let newParentId: string | null = null;
+    if (targetPath !== "root") {
+      const targetFolderName = pathParts[pathParts.length - 1];
+      const targetFolderDoc = documents.find(
+        (doc) =>
+          doc.name === ".option" &&
+          doc.dir === targetFolderName &&
+          doc.depth === newDepth - 1,
+      );
+      newParentId = targetFolderDoc?.docId || null;
+    }
+
+    if (dragItem.type === "document" && dragItem.doc) {
+      // 문서 이동 - newParentId, newDepth 전송
       if (wsRef.current?.readyState === WebSocket.OPEN) {
         wsRef.current.send(
           JSON.stringify({
@@ -1320,23 +1297,20 @@ export default function Home() {
               time: Date.now(),
               channelId: currentChannel.channelId,
               docId: dragItem.doc.docId,
-              newDir: newDir,
+              newParentId: newParentId, // null이면 root로 이동
               newDepth: newDepth,
             },
           }),
         );
-        addLog(`문서 이동: ${dragItem.path} → ${targetPath}/${itemName}`);
+        addLog(
+          `문서 이동: ${dragItem.path} → ${targetPath}/${itemName} (parentId: ${newParentId})`,
+        );
         addChannelLog(`📄 문서 이동: ${itemName} → ${targetPath}`);
       }
     } else if (dragItem.type === "folder" && dragItem.doc) {
-      // 폴더 이동 - .option 파일의 dir(목적지)과 depth를 변경
+      // 폴더 이동 - newParentId, newDepth 전송
       // 서버가 하위 항목들의 depth도 재귀적으로 업데이트
       const folderName = dragItem.doc.dir; // 이동시킬 폴더명 (로그용)
-      // targetPath 예: "root" → newDir: "root", newDepth: 1
-      // targetPath 예: "root/pathC" → newDir: "pathC", newDepth: 2
-      const pathParts = targetPath.split("/").filter((p) => p.length > 0);
-      const newDir = pathParts[pathParts.length - 1] || "root"; // 목적지 폴더명
-      const newDepth = pathParts.length; // 대상 폴더의 하위이므로 pathParts.length
 
       if (wsRef.current?.readyState === WebSocket.OPEN) {
         wsRef.current.send(
@@ -1346,14 +1320,16 @@ export default function Home() {
               time: Date.now(),
               channelId: currentChannel.channelId,
               docId: dragItem.doc.docId,
-              newDir: newDir, // 목적지 폴더명 (pathC)
+              newParentId: newParentId, // null이면 root로 이동
               newDepth: newDepth,
             },
           }),
         );
       }
 
-      addLog(`폴더 이동: ${dragItem.path} → ${targetPath}/${folderName}`);
+      addLog(
+        `폴더 이동: ${dragItem.path} → ${targetPath}/${folderName} (parentId: ${newParentId})`,
+      );
       addChannelLog(`📁 폴더 이동: ${folderName} → ${targetPath}`);
     }
 
@@ -1365,7 +1341,7 @@ export default function Home() {
   const createFolder = () => {
     if (!createModal || !currentChannel || !newItemName.trim()) return;
 
-    // 폴더 생성: {docName: ".option", dir: "폴더명", depth: n}
+    // 폴더 생성: {docName: ".option", dir: "폴더명", parentId: 부모.option ID, depth: n}
     // createModal.depth는 부모의 depth이므로 +1
     const folderDepth = createModal.depth + 1;
     const folderName = newItemName.trim();
@@ -1379,11 +1355,14 @@ export default function Home() {
             channelId: currentChannel.channelId,
             docName: ".option", // 폴더 마커
             dir: folderName, // 폴더명이 dir에 들어감
+            parentId: createModal.parentId, // 부모 폴더의 .option docId (root면 null)
             depth: folderDepth,
           },
         }),
       );
-      addLog(`폴더 생성 요청: ${folderName} (depth: ${folderDepth})`);
+      addLog(
+        `폴더 생성 요청: ${folderName} (parentId: ${createModal.parentId}, depth: ${folderDepth})`,
+      );
 
       // 부모 폴더를 열린 상태로 만들기
       setExpandedFolders((prev) => {
@@ -1401,8 +1380,8 @@ export default function Home() {
   const createDocument = () => {
     if (!createModal || !currentChannel || !newItemName.trim()) return;
 
-    // 문서 생성: {docName: "파일명", dir: "상위폴더명", depth: n}
-    // createModal.depth는 부모의 depth이므로 +1 (단, root는 depth -1이므로 특별 처리)
+    // 문서 생성: {docName: "파일명", dir: "상위폴더명", parentId: 부모.option ID, depth: n}
+    // createModal.depth는 부모의 depth이므로 +1
     const docDepth = createModal.depth + 1;
     // dir은 상위 폴더명 (root의 경우 "root")
     const parentDir = createModal.dir.split("/").pop() || "root";
@@ -1416,11 +1395,14 @@ export default function Home() {
             channelId: currentChannel.channelId,
             docName: newItemName.trim(),
             dir: parentDir,
+            parentId: createModal.parentId, // 부모 폴더의 .option docId (root면 null)
             depth: docDepth,
           },
         }),
       );
-      addLog(`문서 생성 요청: ${parentDir}/${newItemName.trim()}`);
+      addLog(
+        `문서 생성 요청: ${parentDir}/${newItemName.trim()} (parentId: ${createModal.parentId})`,
+      );
 
       // 부모 폴더를 열린 상태로 만들기
       setExpandedFolders((prev) => {
@@ -1564,7 +1546,14 @@ export default function Home() {
             style={{ paddingLeft: `${paddingLeft + 8}px` }}
             onClick={() => toggleFolder(node.path)}
             onContextMenu={(e) =>
-              handleContextMenu(e, node.path, node.depth, true, node.doc)
+              handleContextMenu(
+                e,
+                node.path,
+                node.depth,
+                true,
+                node.doc,
+                node.doc?.docId || null,
+              )
             }
             draggable={node.path !== "root"}
             onDragStart={(e) =>
@@ -1603,7 +1592,14 @@ export default function Home() {
         style={{ paddingLeft: `${paddingLeft + 20}px` }}
         onClick={() => node.doc && openDocument(node.doc)}
         onContextMenu={(e) =>
-          handleContextMenu(e, node.path, node.depth, false, node.doc)
+          handleContextMenu(
+            e,
+            node.path,
+            node.depth,
+            false,
+            node.doc,
+            node.doc?.parentId || null,
+          )
         }
         draggable
         onDragStart={(e) => handleDragStart(e, "document", node.path, node.doc)}
@@ -2015,7 +2011,9 @@ export default function Home() {
             {/* 문서 트리 */}
             <div
               className="flex-1 overflow-y-auto"
-              onContextMenu={(e) => handleContextMenu(e, "root", 0, true)}
+              onContextMenu={(e) =>
+                handleContextMenu(e, "root", 0, true, undefined, null)
+              }
               onDragOver={(e) => handleDragOver(e, "root")}
               onDragLeave={handleDragLeave}
               onDrop={(e) => handleDrop(e, "root")}
