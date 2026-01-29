@@ -1304,13 +1304,13 @@ export default function Home() {
 
     if (dragItem.type === "document" && dragItem.doc) {
       // 문서 이동 - newDir, newDepth 직접 전송
-      // targetPath 예: "root" → newDir: "root", newDepth: 0
-      // targetPath 예: "root/pathA" → newDir: "pathA", newDepth: 1
+      // targetPath 예: "root" → newDir: "root", newDepth: 1
+      // targetPath 예: "root/pathA" → newDir: "pathA", newDepth: 2
       const pathParts = targetPath.split("/").filter((p) => p.length > 0);
-      // root로 이동 시 dir="root", depth=0
-      // 폴더로 이동 시 dir=폴더명, depth=해당 폴더의 depth + 1 = pathParts.length
+      // root로 이동 시 dir="root", depth=1
+      // 폴더로 이동 시 dir=폴더명, depth=pathParts.length (root=1, root/A=2, root/A/B=3)
       const newDir = pathParts[pathParts.length - 1] || "root";
-      const newDepth = targetPath === "root" ? 0 : pathParts.length;
+      const newDepth = pathParts.length; // root→1, root/A→2, root/A/B→3
 
       if (wsRef.current?.readyState === WebSocket.OPEN) {
         wsRef.current.send(
@@ -1329,13 +1329,13 @@ export default function Home() {
         addChannelLog(`📄 문서 이동: ${itemName} → ${targetPath}`);
       }
     } else if (dragItem.type === "folder" && dragItem.doc) {
-      // 폴더 이동 - .option 파일의 depth만 변경 (dir=폴더명은 유지)
-      // 서버가 하위 항목들의 depth도 업데이트
+      // 폴더 이동 - .option 파일의 dir과 depth를 변경
+      // 서버가 하위 항목들의 depth도 재귀적으로 업데이트
       const folderName = dragItem.doc.dir; // .option 파일의 dir이 폴더명
-      // targetPath 예: "root" → newDepth: 1 (root 아래에 폴더)
-      // targetPath 예: "root/pathA" → newDepth: 2 (pathA 아래에 폴더)
+      // targetPath 예: "root" → newDir: 폴더명(유지), newDepth: 1 (root 아래에 폴더)
+      // targetPath 예: "root/pathA" → newDir: 폴더명(유지), newDepth: 2 (pathA 아래에 폴더)
       const pathParts = targetPath.split("/").filter((p) => p.length > 0);
-      const newDepth = pathParts.length; // 대상 폴더의 하위이므로 +1이 아닌 그냥 length
+      const newDepth = pathParts.length; // 대상 폴더의 하위이므로 pathParts.length
 
       if (wsRef.current?.readyState === WebSocket.OPEN) {
         wsRef.current.send(
@@ -1345,7 +1345,8 @@ export default function Home() {
               time: Date.now(),
               channelId: currentChannel.channelId,
               docId: dragItem.doc.docId,
-              newDepth: newDepth, // depth만 변경
+              newDir: folderName, // 폴더명은 유지 (폴더의 dir은 자신의 이름)
+              newDepth: newDepth,
             },
           }),
         );
