@@ -1329,12 +1329,13 @@ export default function Home() {
         addChannelLog(`📄 문서 이동: ${itemName} → ${targetPath}`);
       }
     } else if (dragItem.type === "folder" && dragItem.doc) {
-      // 폴더 이동 - .option 파일의 dir과 depth를 변경
+      // 폴더 이동 - .option 파일의 dir(목적지)과 depth를 변경
       // 서버가 하위 항목들의 depth도 재귀적으로 업데이트
-      const folderName = dragItem.doc.dir; // .option 파일의 dir이 폴더명
-      // targetPath 예: "root" → newDir: 폴더명(유지), newDepth: 1 (root 아래에 폴더)
-      // targetPath 예: "root/pathA" → newDir: 폴더명(유지), newDepth: 2 (pathA 아래에 폴더)
+      const folderName = dragItem.doc.dir; // 이동시킬 폴더명 (로그용)
+      // targetPath 예: "root" → newDir: "root", newDepth: 1
+      // targetPath 예: "root/pathC" → newDir: "pathC", newDepth: 2
       const pathParts = targetPath.split("/").filter((p) => p.length > 0);
+      const newDir = pathParts[pathParts.length - 1] || "root"; // 목적지 폴더명
       const newDepth = pathParts.length; // 대상 폴더의 하위이므로 pathParts.length
 
       if (wsRef.current?.readyState === WebSocket.OPEN) {
@@ -1345,7 +1346,7 @@ export default function Home() {
               time: Date.now(),
               channelId: currentChannel.channelId,
               docId: dragItem.doc.docId,
-              newDir: folderName, // 폴더명은 유지 (폴더의 dir은 자신의 이름)
+              newDir: newDir, // 목적지 폴더명 (pathC)
               newDepth: newDepth,
             },
           }),
