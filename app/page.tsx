@@ -257,18 +257,25 @@ export default function Home() {
       // .option 파일을 폴더로 처리 (name=".option"이면 dir이 폴더명)
       docsAtDepth.forEach((doc) => {
         if (doc.name === ".option") {
+          // depth=0이고 dir="root"인 경우는 root 폴더 자체이므로 표시하지 않음
+          if (depth === 0 && doc.dir === "root") {
+            return; // root 폴더는 스킵
+          }
+
           // 폴더 노드 생성 - doc.dir이 폴더명
           const folderName = doc.dir;
 
-          // depth 0이면 root 아래에 폴더가 있음
+          // depth 0이면 root 아래에 폴더가 있음 (root 폴더 자체 제외)
           // depth 1 이상이면 상위 폴더 찾기 필요
           let parentNode: TreeNode | undefined;
           if (depth === 0) {
-            // root 아래에 폴더 생성
+            // root 아래에 폴더 생성 (depth 0인 일반 폴더)
+            parentNode = root;
+          } else if (depth === 1) {
+            // depth 1인 폴더는 root 아래에 있음
             parentNode = root;
           } else {
-            // depth - 1인 폴더 중에서 부모 찾기
-            // 상위 폴더를 찾는 로직: 동일 depth의 다른 문서들의 dir을 참고
+            // depth 2 이상인 경우 상위 폴더 찾기
             folderMap.forEach((node) => {
               if (node.depth === depth - 1 && node.isFolder) {
                 parentNode = node;
@@ -558,7 +565,10 @@ export default function Home() {
                     3000,
                   );
                 } else {
-                  showToast(`✅ 폴더 "${data.dir}" 생성됨`, 3000);
+                  // root 폴더(.option depth=0, dir="root")는 토스트 스킵
+                  if (!(data.depth === 0 && data.dir === "root")) {
+                    showToast(`✅ 폴더 "${data.dir}" 생성됨`, 3000);
+                  }
                 }
                 // 문서 목록에 추가 (서버 응답 형식에 맞게 처리)
                 if (data.docId) {
@@ -571,6 +581,36 @@ export default function Home() {
                     createdAt: new Date().toISOString(),
                   };
                   setDocuments((prev) => [...prev, newDoc]);
+
+                  // 해당 폴더를 열린 상태로 만들기 (추가한 사용자의 UI에서만)
+                  // 폴더 생성 시: 새 폴더의 부모 폴더를 열기
+                  // 문서 생성 시: 문서가 속한 폴더를 열기
+                  if (isFolder) {
+                    // 폴더 생성 시: 부모 폴더 열기 (depth-1의 폴더 또는 root)
+                    if (data.depth === 1) {
+                      // depth 1인 폴더는 root 아래에 있음 - root는 이미 열려있음
+                    } else if (data.depth > 1) {
+                      // depth > 1인 경우 상위 폴더를 찾아서 열기
+                      // 현재 구조에서는 상위 폴더 경로를 정확히 알기 어려움
+                    }
+                  } else {
+                    // 문서 생성 시: 문서가 속한 폴더 열기
+                    if (data.dir !== "root") {
+                      // root가 아닌 폴더에 문서 추가 시 해당 폴더 찾아서 열기
+                      setExpandedFolders((prev) => {
+                        const newSet = new Set(prev);
+                        // 해당 폴더명(data.dir)을 가진 폴더 경로 찾기
+                        // documents에서 .option 파일을 찾아 경로 구성
+                        // 일단 현재 depth에서 dir명을 가진 폴더를 찾아야 함
+                        // 단순히 `root/${data.dir}` 경로를 추가 (단층 구조에서)
+                        // depth에 따른 경로 계산이 필요하지만 일단 기본 처리
+                        if (data.depth === 1) {
+                          newSet.add(`root/${data.dir}`);
+                        }
+                        return newSet;
+                      });
+                    }
+                  }
                 } else if (data.document) {
                   setDocuments((prev) => [...prev, data.document]);
                 }
@@ -1342,6 +1382,13 @@ export default function Home() {
         }),
       );
       addLog(`폴더 생성 요청: ${folderName} (depth: ${folderDepth})`);
+
+      // 부모 폴더를 열린 상태로 만들기
+      setExpandedFolders((prev) => {
+        const newSet = new Set(prev);
+        newSet.add(createModal.dir); // 부모 폴더 경로 추가
+        return newSet;
+      });
     }
 
     setCreateModal(null);
@@ -1372,6 +1419,13 @@ export default function Home() {
         }),
       );
       addLog(`문서 생성 요청: ${parentDir}/${newItemName.trim()}`);
+
+      // 부모 폴더를 열린 상태로 만들기
+      setExpandedFolders((prev) => {
+        const newSet = new Set(prev);
+        newSet.add(createModal.dir); // 부모 폴더 경로 추가
+        return newSet;
+      });
     }
 
     setCreateModal(null);
